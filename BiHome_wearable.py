@@ -574,6 +574,19 @@ class PolarECGImputer:
         prev_peak = self._last_peak_ts
         self._ingest(ts, val)
         is_beat = (self._last_peak_ts is not None and self._last_peak_ts != prev_peak)
+
+        # Gap prediction: if no beat detected for > 1.8 × mean RR, advance the
+        # expected beat position and mark this sample as a predicted beat.
+        # Accounts for POST_S delay when estimating elapsed time.
+        if (not is_beat
+                and self._last_peak_ts is not None
+                and len(self._rr_hist) >= 2):
+            rr = self._rr_estimate()
+            elapsed = (ts - self.POST_S) - self._last_peak_ts
+            if elapsed > 1.8 * rr:
+                self._last_peak_ts = self._last_peak_ts + rr
+                is_beat = True
+
         return imputed + [(ts, val, is_beat)]
 
     def has_template(self) -> bool:
@@ -602,24 +615,29 @@ class PolarECGImputer:
             return
 
         cval = self._buf_v[ci]
-        win  = self._buf_v[ci - self._pre : ci + self._post + 1]
-        wmin, wmax = min(win), max(win)
+        win  = self._buf_v[ci - self._pre : ci + self._post + 1]  # used for template
 
-        # Local-max/min check over ±LOCAL_WIN samples — much less strict than
-        # requiring global max of the full window, robust to T-waves and noise.
+        # Local-max/min check over ±LOCAL_WIN samples.
+        # Amplitude and polarity are also computed on the LOCAL window — NOT on the
+        # full PRE+POST window (wmin/wmax). At normal heart rates the full window
+        # spans two R-peaks, so wmax is the taller of the two, making
+        # neg_amp = wmax-cval large even for a genuine positive peak, which caused
+        # the polarity branch to flip and the local-ext check to fail on most beats.
         lo = max(0, ci - self.LOCAL_WIN)
         hi = min(n - 1, ci + self.LOCAL_WIN)
-        local = self._buf_v[lo : hi + 1]
+        local     = self._buf_v[lo : hi + 1]
+        local_max = max(local)
+        local_min = min(local)
 
-        pos_amp = cval - wmin   # amplitude as positive peak
-        neg_amp = wmax - cval   # amplitude as negative peak (inverted ECG)
+        pos_amp = cval - local_min   # amplitude if positive peak
+        neg_amp = local_max - cval   # amplitude if negative peak (inverted ECG)
 
         if pos_amp >= neg_amp:
             amp          = pos_amp
-            is_local_ext = (cval == max(local))
+            is_local_ext = (cval == local_max)
         else:
             amp          = neg_amp
-            is_local_ext = (cval == min(local))
+            is_local_ext = (cval == local_min)
 
         if not is_local_ext:
             return
