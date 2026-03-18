@@ -34,6 +34,13 @@ ENABLE_EMOTIBIT = True
 # Set to False to stream raw unfiltered values.
 ENABLE_SIGNAL_FILTER = True
 
+# R-peak template imputation for Polar H10 ECG gaps (BLE packet loss).
+# When enabled, gaps in the Polar ECG stream are filled with a synthetic signal
+# built from the average beat template + estimated RR interval.
+# Only gaps ≤ IMPUTER_MAX_GAP_S are imputed; longer gaps pass through as NaN.
+ENABLE_ECG_IMPUTATION  = True
+IMPUTER_MAX_GAP_S      = 4.0   # seconds — skip imputation for longer dropouts
+
 # =====================================================
 # USER CONFIG
 # =====================================================
@@ -460,6 +467,209 @@ class SignalFilter:
 
 
 # =====================================================
+# Polar ECG imputer — R-peak template + RR prediction
+# =====================================================
+
+class PolarECGImputer:
+    """Fills BLE dropout gaps in Polar H10 ECG with synthetic beats.
+
+    Algorithm
+    ---------
+    Feed every ECG sample (including NaN gaps) through push().
+    - Real samples update an R-peak detector, a beat template (average of
+      the last MAX_BEATS beats), and an RR-interval history.
+    - When a NaN run ends and the gap is ≤ max_gap_s, _fill() generates
+      synthetic samples by placing the template at phase-continuous beat
+      positions and returns them together with the resuming real sample.
+
+    Timestamps are in Arduino device-seconds (same domain as t_dev_s),
+    so the caller can convert them to LSL time with the usual sync object.
+
+    Peak detection
+    --------------
+    - Delayed by POST_S seconds so we can inspect the full post-R window.
+    - Candidate must be the global maximum of its [PRE_S … POST_S] window.
+    - Window amplitude must exceed MIN_AMP_UV (guards against flat noise).
+    - Enforces a refractory period of REFRACT_S after every accepted peak.
+
+    Notes
+    -----
+    - The template is baseline-subtracted (DC-removed per beat), so the
+      synthetic signal is centred around 0.  This is intentional: it makes
+      the imputed segment visually distinguishable from real ECG while
+      still showing correct beat morphology and timing.
+    - ACC channels are set to NaN for imputed samples (no ACC data for gaps).
+    """
+
+    FS          = 130.0   # Hz  — must match POLAR_2.ino ECG output rate
+    PRE_S       = 0.25    # window before R-peak (seconds)
+    POST_S      = 0.40    # window after  R-peak (seconds)
+    MIN_RR_S    = 0.35    # fastest plausible heart rate (~170 bpm)
+    MAX_RR_S    = 1.60    # slowest plausible heart rate (~37 bpm)
+    REFRACT_S   = 0.25    # min time between two accepted peaks
+    PEAK_FRAC   = 0.80    # candidate must be ≥ 80 % of window range above min
+    MIN_AMP_UV  = 300.0   # µV — minimum window amplitude to attempt peak detection
+    MAX_BEATS   = 8       # beats kept in template average
+    MAX_RR_HIST = 10      # RR intervals kept for heart-rate estimate
+
+    def __init__(self, max_gap_s: float = 4.0):
+        self._max_gap   = max_gap_s
+        self._pre       = int(self.PRE_S   * self.FS)
+        self._post      = int(self.POST_S  * self.FS)
+        self._refract   = int(self.REFRACT_S * self.FS)
+
+        self._buf_max   = int(3.0 * self.FS)
+        self._buf_v: List[float] = []
+        self._buf_t: List[float] = []
+
+        self._beats:    List[List[float]] = []
+        self._template: Optional[List[float]] = None
+
+        self._rr_hist:      List[float]  = []
+        self._last_peak_ts: Optional[float] = None
+        self._since_peak    = self._refract   # start ready
+
+        self._in_gap        = False
+        self._gap_start_ts: Optional[float] = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def push(self, ts: float, val: float) -> List[Tuple[float, float]]:
+        """Feed one sample (ts in device-seconds, val in µV or NaN).
+
+        Returns a list of (ts, ecg_val) pairs to emit:
+          - Normal:    [(ts, val)]
+          - Gap start: []  (NaN samples are silently consumed)
+          - Gap end:   [(imp_ts, imp_val), ..., (ts, val)]
+        """
+        import math
+        if math.isnan(val):
+            if not self._in_gap:
+                self._in_gap       = True
+                self._gap_start_ts = ts
+            return []
+
+        imputed: List[Tuple[float, float]] = []
+        if self._in_gap and self._gap_start_ts is not None:
+            gap_dur = ts - self._gap_start_ts
+            if 0.0 < gap_dur <= self._max_gap:
+                imputed = self._fill(self._gap_start_ts, ts)
+            self._in_gap       = False
+            self._gap_start_ts = None
+
+        self._ingest(ts, val)
+        return imputed + [(ts, val)]
+
+    def has_template(self) -> bool:
+        return self._template is not None and len(self._rr_hist) >= 2
+
+    # ------------------------------------------------------------------
+    # Internal: live sample ingestion
+    # ------------------------------------------------------------------
+
+    def _ingest(self, ts: float, val: float) -> None:
+        self._buf_v.append(val)
+        self._buf_t.append(ts)
+        if len(self._buf_v) > self._buf_max:
+            del self._buf_v[0]
+            del self._buf_t[0]
+
+        self._since_peak += 1
+
+        # R-peak detection is delayed by _post samples so we can verify
+        # that the candidate is a true local maximum of the post-window.
+        n  = len(self._buf_v)
+        ci = n - self._post - 1        # candidate index in buffer
+        if ci < self._pre:
+            return
+        if self._since_peak < self._refract:
+            return
+
+        cval = self._buf_v[ci]
+        win  = self._buf_v[ci - self._pre : ci + self._post + 1]
+        wmin, wmax = min(win), max(win)
+
+        if (wmax - wmin) < self.MIN_AMP_UV:
+            return
+        if cval != wmax:                          # must be the global peak
+            return
+        if cval < wmin + (wmax - wmin) * self.PEAK_FRAC:
+            return
+
+        # ---- Valid R-peak ----
+        peak_ts          = self._buf_t[ci]
+        self._since_peak = 0
+
+        if self._last_peak_ts is not None:
+            rr = peak_ts - self._last_peak_ts
+            if self.MIN_RR_S <= rr <= self.MAX_RR_S:
+                self._rr_hist.append(rr)
+                if len(self._rr_hist) > self.MAX_RR_HIST:
+                    del self._rr_hist[0]
+        self._last_peak_ts = peak_ts
+
+        # Baseline-subtract and store beat
+        edge = max(1, len(win) // 5)
+        bl   = (sum(win[:edge]) + sum(win[-edge:])) / (2 * edge)
+        beat = [v - bl for v in win]
+
+        self._beats.append(beat)
+        if len(self._beats) > self.MAX_BEATS:
+            del self._beats[0]
+
+        # Recompute template as arithmetic mean of stored beats
+        tlen  = len(self._beats[0])
+        valid = [b for b in self._beats if len(b) == tlen]
+        if len(valid) >= 2:
+            tmpl = [0.0] * tlen
+            for b in valid:
+                for i in range(tlen):
+                    tmpl[i] += b[i]
+            self._template = [v / len(valid) for v in tmpl]
+
+    # ------------------------------------------------------------------
+    # Internal: gap filling
+    # ------------------------------------------------------------------
+
+    def _rr_estimate(self) -> Optional[float]:
+        if not self._rr_hist:
+            return None
+        return sum(self._rr_hist) / len(self._rr_hist)
+
+    def _fill(self, gap_start: float, gap_end: float) -> List[Tuple[float, float]]:
+        if self._template is None or self._last_peak_ts is None:
+            return []
+        rr = self._rr_estimate()
+        if rr is None:
+            return []
+
+        dt     = 1.0 / self.FS
+        n      = max(0, int((gap_end - gap_start) * self.FS) - 1)
+        if n == 0:
+            return []
+
+        ts_out  = [gap_start + i * dt for i in range(n)]
+        vals    = [0.0] * n
+
+        # Phase-continuous beat placement: compute where in the RR cycle
+        # we are at gap_start, then count forward by rr until gap_end.
+        phase          = (gap_start - self._last_peak_ts) % rr
+        beat_offset    = rr - phase           # seconds to first beat inside gap
+
+        while beat_offset < (gap_end - gap_start):
+            ci = int(beat_offset * self.FS)
+            for j, v in enumerate(self._template):
+                idx = ci - self._pre + j
+                if 0 <= idx < n:
+                    vals[idx] += v
+            beat_offset += rr
+
+        return list(zip(ts_out, vals))
+
+
+# =====================================================
 # TCP helpers
 # =====================================================
 
@@ -810,6 +1020,12 @@ class ArduinoUSBPolarThread(threading.Thread):
             if ENABLE_SIGNAL_FILTER else {}
         )
 
+        # ECG imputer: fills BLE dropout gaps with synthetic beats.
+        self._ecg_imputers: Dict[str, PolarECGImputer] = (
+            {lbl: PolarECGImputer(max_gap_s=IMPUTER_MAX_GAP_S) for lbl in self.label_map}
+            if ENABLE_ECG_IMPUTATION else {}
+        )
+
     def connect(self) -> bool:
         self.health.set(state="CONNECTING", detail=f"{self.port}@{self.baud}")
         self.ser = serial_open(self.port, self.baud)
@@ -830,19 +1046,39 @@ class ArduinoUSBPolarThread(threading.Thread):
         serial_send(self.ser, f"SYNC:{seq}")
 
     def _push_label(self, lbl: str, values: List[float], t_dev_s: float) -> None:
-        # Filter ECG channel (index 0) only; ACC channels are left unfiltered.
-        f = self._polar_ecg_filters.get(lbl)
-        if f is not None and len(values) > 0:
-            values = [f.apply(values[0])] + list(values[1:])
-        ts_host = self.sync.estimate_host_time(t_dev_s)
+        # --- Imputation ---
+        # Feed ECG channel through imputer; it may return imputed (ts, ecg) pairs
+        # for a preceding gap, followed by the real sample.
+        imputer = self._ecg_imputers.get(lbl)
+        n_ch    = len(values)
+
+        if imputer is not None and n_ch > 0:
+            pairs: List[Tuple[float, List[float]]] = []
+            for imp_ts, imp_ecg in imputer.push(t_dev_s, values[0]):
+                # Imputed samples carry NaN for ACC channels (no data for the gap).
+                imp_vals = [imp_ecg] + [float('nan')] * (n_ch - 1)
+                pairs.append((imp_ts, imp_vals))
+        else:
+            pairs = [(t_dev_s, list(values))]
+
+        # --- Health bookkeeping (once per real call, not per imputed sample) ---
         now = float(local_clock())
-        self.last_data_any_at = now
-        self.last_data_by_label[lbl] = now
+        self.last_data_any_at          = now
+        self.last_data_by_label[lbl]   = now
         self.health.set(last_data_at=now, first_data=True, detail="streaming")
+
         if not ready_event.is_set():
             return
+
+        # --- Filter + push (each sample in pairs) ---
+        filt = self._polar_ecg_filters.get(lbl)
         try:
-            self.outlets[lbl].push_sample([float(v) for v in values], timestamp=float(ts_host))
+            for ts_dev, vals in pairs:
+                # Filter ECG channel only; ACC left unfiltered.
+                if filt is not None and len(vals) > 0:
+                    vals = [filt.apply(vals[0])] + list(vals[1:])
+                ts_host = self.sync.estimate_host_time(ts_dev)
+                self.outlets[lbl].push_sample([float(v) for v in vals], timestamp=float(ts_host))
             if not self._printed_first_by_label.get(lbl, False):
                 sname = self.label_map.get(lbl, ("(unknown)", [], 0.0))[0]
                 log("[ArduinoUSBPolar]", f"Primo campione LSL inviato (label='{lbl}' -> '{sname}').")

@@ -150,6 +150,46 @@ lsl_viewer      # visualizza i segnali in tempo reale
 
 ---
 
+## Imputazione dei battiti mancanti (Polar H10 ECG)
+
+Quando il BLE perde uno o più pacchetti, il firmware `POLAR_2.ino` marca i campioni mancanti come `NaN`. Con `ENABLE_ECG_IMPUTATION = True`, lo script Python rileva questi gap e li riempie con un segnale ECG sintetico che mostra dove il battito sarebbe dovuto essere.
+
+### Algoritmo
+
+1. **R-peak detection in tempo reale**: ogni campione viene confrontato con una finestra `[-250 ms … +400 ms]`. Se è il massimo assoluto della finestra, supera la soglia relativa (`≥ 80%` del range), e rispetta il periodo refrattario (250 ms), viene accettato come R-peak.
+2. **Template del battito**: gli ultimi `MAX_BEATS = 8` battiti vengono mediati (con sottrazione della baseline per rimuovere il DC) per produrre un template medio della morfologia del battito.
+3. **Stima dell'intervallo RR**: media degli ultimi 10 intervalli RR validi (range ammesso: 350 ms – 1600 ms).
+4. **Gap filling**: quando il segnale torna reale dopo un gap `≤ IMPUTER_MAX_GAP_S`, il filler:
+   - calcola la fase (dove siamo nel ciclo RR al momento del gap)
+   - piazza il template a ogni posizione di battito predetta, fase-continua con l'ultimo R-peak reale
+   - restituisce i campioni sintetici con timestamp corretti (stessa base temporale dell'ECG reale)
+
+```
+Segnale reale:    ____/\____/\____[  NaN gap  ]____/\____
+Segnale imputato: ____/\____/\____[/\__synth__]____/\____
+                                   ↑ beat previsto dal template + RR
+```
+
+### Limiti
+
+| Limite | Valore default | Note |
+|---|---|---|
+| Gap massimo imputato | `IMPUTER_MAX_GAP_S = 4.0 s` | Oltre questo, il gap rimane NaN |
+| Battiti nel template | `MAX_BEATS = 8` | Template stabile dopo ~8 battiti (~7s) |
+| Range frequenza cardiaca | 37 – 170 bpm | Fuori range → RR scartato |
+| Frequenza campionamento | 130 Hz (da `POLAR_2.ino`) | Hardcoded in `PolarECGImputer.FS` |
+
+> **Nota**: i campioni imputati hanno il **canale ECG sintetico** e i **canali ACC = NaN** (non c'è dati accelerometro per il gap). I timestamp sono corretti e coerenti con il resto dello stream LSL.
+
+### Attivazione / disattivazione
+
+```python
+ENABLE_ECG_IMPUTATION = True    # True = imputa i gap, False = NaN puri
+IMPUTER_MAX_GAP_S     = 4.0     # gap più lunghi non vengono imputati
+```
+
+---
+
 ## Filtro lineare sui segnali
 
 I segnali ECG (WiFi e Polar H10) e PPG (EmotiBit) vengono opzionalmente filtrati in Python prima dell'invio all'outlet LSL tramite una **media mobile pesata causale** (no dipendenze esterne, puro Python).
