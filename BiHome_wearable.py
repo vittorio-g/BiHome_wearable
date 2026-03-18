@@ -528,10 +528,30 @@ def parse_T_payload(value: str) -> Optional[Tuple[int, float, float]]:
 
 def parse_wrapped_sample(value: str, n_ch: int) -> Optional[Tuple[float, List[float]]]:
     """
-    "wrap,us32,val1,val2,...,valN"
+    Formato nominale (nuovo): "wrap:123,us32:456789,nome1:v1,nome2:v2,..."
+    Formato posizionale (legacy): "wrap,us32,val1,val2,...,valN"
+    Ritorna (t_dev_s, [val1, val2, ...]).
     """
     try:
         parts = [p.strip() for p in value.split(",") if p.strip()]
+
+        # Formato nominale: ogni campo contiene ":"
+        if all(":" in p for p in parts):
+            kv: Dict[str, str] = {}
+            ordered: List[Tuple[str, str]] = []
+            for p in parts:
+                k, v = p.split(":", 1)
+                kv[k.strip()] = v.strip()
+                ordered.append((k.strip(), v.strip()))
+            wrap = int(kv["wrap"])
+            us32 = int(kv["us32"])
+            vals = [float(v) for k, v in ordered if k not in ("wrap", "us32")]
+            if len(vals) != n_ch:
+                return None
+            t_us64 = arduino_us64(wrap, us32)
+            return float(t_us64 / 1e6), vals
+
+        # Formato posizionale legacy: "wrap,us32,val1,...,valN"
         if len(parts) != (2 + n_ch):
             return None
         wrap = int(parts[0])
@@ -539,6 +559,7 @@ def parse_wrapped_sample(value: str, n_ch: int) -> Optional[Tuple[float, List[fl
         vals = [float(x) for x in parts[2:]]
         t_us64 = arduino_us64(wrap, us32)
         return float(t_us64 / 1e6), vals
+
     except Exception:
         return None
 

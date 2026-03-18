@@ -235,8 +235,8 @@ La posizione 3D viene stimata per trilaterazione dalle 3 distanze misurate.
 
 | Label | Formato | Descrizione |
 |---|---|---|
-| `ECG:` | `wrap,us32,ecg_mV` | Campione ECG Arduino WiFi |
-| `Sens:` | `wrap,us32,ecg,ax,ay,az` | Batch Polar H10 (ECG + ACC) |
+| `ECG:` | `wrap:<v>,us32:<v>,ecg_mV:<v>` | Campione ECG Arduino WiFi |
+| `Sens:` | `wrap:<v>,us32:<v>,ecg:<v>,ax:<v>,ay:<v>,az:<v>` | Batch Polar H10 (ECG + ACC) |
 | `T:` | vedi sopra | Risposta sync |
 | `INFO:*` | stringa | Messaggi diagnostici |
 | `WARN:*` | stringa | Avvisi |

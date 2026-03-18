@@ -503,19 +503,24 @@ void emitDashboardRow(uint64_t t_tick) {
   uint32_t w, us32;
   splitMicros64(t_tick, w, us32);
 
+  // Formato nome:valore — leggibile dal Serial Plotter e parseable per nome dal PC.
   Serial.print("Sens:");
-  Serial.print(w); Serial.print(",");
-  Serial.print(us32); Serial.print(",");
+  Serial.print("wrap:"); Serial.print(w);    Serial.print(",");
+  Serial.print("us32:"); Serial.print(us32); Serial.print(",");
 
+  Serial.print("ecg:");
   if (isnan(lastEcg_uV)) Serial.print("nan"); else Serial.print(lastEcg_uV, 2);
   Serial.print(",");
 
+  Serial.print("ax:");
   if (isnan(lastAx_mg)) Serial.print("nan"); else Serial.print(lastAx_mg, 2);
   Serial.print(",");
 
+  Serial.print("ay:");
   if (isnan(lastAy_mg)) Serial.print("nan"); else Serial.print(lastAy_mg, 2);
   Serial.print(",");
 
+  Serial.print("az:");
   if (isnan(lastAz_mg)) Serial.print("nan"); else Serial.print(lastAz_mg, 2);
 
   Serial.print("\n");
