@@ -4,14 +4,18 @@
 // CONFIG SAMPLE RATE
 // ==============================
 // H10: ECG 130 Hz, ACC 25/50/100/200 Hz
-const uint16_t ECG_SAMPLE_RATE_HZ = 50;
-const uint16_t ACC_SAMPLE_RATE_HZ = 50;   // abbassato da 200 -> 100
+// NOTA: ECG_SAMPLE_RATE_HZ deve corrispondere al valore nel payload ENABLE_ECG
+// (byte 4 = 0x82 = 130 decimale). Cambiare uno senza l'altro causa timestamp
+// errati e perdita di campioni.
+const uint16_t ECG_SAMPLE_RATE_HZ = 130;
+const uint16_t ACC_SAMPLE_RATE_HZ = 50;
 
 const uint32_t ECG_PERIOD_US = (uint32_t)(1000000.0 / (double)ECG_SAMPLE_RATE_HZ + 0.5);
 const uint32_t ACC_PERIOD_US = (uint32_t)(1000000.0 / (double)ACC_SAMPLE_RATE_HZ + 0.5);
 
-// Output tick = frequenza più lenta
-const uint32_t OUT_PERIOD_US = (ECG_PERIOD_US >= ACC_PERIOD_US) ? ECG_PERIOD_US : ACC_PERIOD_US;
+// Output tick = frequenza del sensore più veloce (ECG a 130 Hz).
+// L'ACC a 50 Hz mantiene l'ultimo valore tra un campione e il successivo.
+const uint32_t OUT_PERIOD_US = (ECG_PERIOD_US <= ACC_PERIOD_US) ? ECG_PERIOD_US : ACC_PERIOD_US;
 
 // ==============================
 // PIN / SERIAL
