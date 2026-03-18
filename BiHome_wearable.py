@@ -505,12 +505,14 @@ class PolarECGImputer:
 
     FS          = 130.0   # Hz  — must match POLAR_2.ino ECG output rate
     PRE_S       = 0.25    # window before R-peak (seconds)
-    POST_S      = 0.40    # window after  R-peak (seconds)
+    POST_S      = 0.15    # window after R-peak (seconds) — short: R-peaks are sharp,
+                          # 0.15 s is enough to confirm the max; reduces marker delay
+                          # from ~52 samples (0.40 s) to ~20 samples (0.15 s).
     MIN_RR_S    = 0.35    # fastest plausible heart rate (~170 bpm)
     MAX_RR_S    = 1.60    # slowest plausible heart rate (~37 bpm)
     REFRACT_S   = 0.25    # min time between two accepted peaks
     PEAK_FRAC   = 0.80    # candidate must be ≥ 80 % of window range above min
-    MIN_AMP_UV  = 300.0   # µV — minimum window amplitude to attempt peak detection
+    MIN_AMP_UV  = 150.0   # µV — minimum window amplitude to attempt peak detection
     MAX_BEATS   = 8       # beats kept in template average
     MAX_RR_HIST = 10      # RR intervals kept for heart-rate estimate
 
