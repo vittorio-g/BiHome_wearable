@@ -84,8 +84,9 @@ def log(tag: str, msg: str) -> None:
 # Global stop
 # =====================================================
 
-stop_event = threading.Event()
-send_lock = threading.Lock()
+stop_event  = threading.Event()
+send_lock   = threading.Lock()
+ready_event = threading.Event()  # set quando tutti i dispositivi abilitati sono connessi
 
 # =====================================================
 # Device/system health
@@ -191,53 +192,40 @@ class SystemMonitorThread(threading.Thread):
         return True, "OK", "streaming"
 
     def run(self):
+        _logged_active: set = set()
+        _logged_error:  set = set()
+
         while not stop_event.is_set():
-            enabled_any = any(d.health.enabled for d in self.devices)
-
-            rows = []
-            problems = []
-            oks = []
-
             for d in self.devices:
-                ok, code, msg = self._evaluate(d)
                 if not d.health.enabled:
                     continue
-                rows.append((d.health.name, ok, code, msg))
-                if ok:
-                    oks.append(d.health.name)
-                else:
-                    problems.append((d.health.name, code, msg))
+                name = d.health.name
+                state, detail, _, _, _, fatal_error = d.health.snapshot()
 
-            if not enabled_any or len(rows) == 0:
-                all_ok = False
-                sig = "NO_ENABLED_OR_NO_ROWS"
-            else:
-                all_ok = (len(problems) == 0)
-                sig_parts = []
-                for name, _, code, msg in rows:
-                    if code in ("ERROR", "CONNECTING", "WAIT_CONNECT", "WAIT_DATA", "NO_THREAD", "THREAD_DEAD", "STOPPED"):
-                        sig_parts.append(f"{name}:{code}:{msg}")
-                    else:
-                        sig_parts.append(f"{name}:{code}")
-                sig = "|".join(sig_parts) + f"||ALL_OK={int(all_ok)}"
+                # Messaggio una-tantum quando il dispositivo si connette
+                if state == "ACTIVE" and name not in _logged_active:
+                    _logged_active.add(name)
+                    log("[SETUP]", f"✓ {name} collegato")
 
-            changed = (sig != self._last_sig) or (all_ok != self._last_all_ok) or (not self._printed_once)
+                # Messaggio una-tantum in caso di errore irreversibile
+                err_msg = fatal_error or (detail if state == "ERROR" else None)
+                if err_msg and name not in _logged_error:
+                    _logged_error.add(name)
+                    log("[SETUP]", f"✗ {name} errore: {err_msg}")
 
-            if changed:
-                self._printed_once = True
+                # Thread morto inaspettatamente
+                if (d.thread is not None and not d.thread.is_alive()
+                        and not stop_event.is_set()
+                        and name not in _logged_error):
+                    _logged_error.add(name)
+                    log("[SETUP]", f"✗ {name} thread terminato inaspettatamente")
 
-                if all_ok:
-                    log("[SYSTEM]", "ALL ENABLED FEATURES OK ✅")
-                    log("[SYSTEM]", "OK devices: " + ", ".join(oks))
-                else:
-                    log("[SYSTEM]", "SYSTEM NOT READY ❌")
-                    for name, code, msg in problems:
-                        log("[SYSTEM]", f" - {name}: {code} ({msg})")
-                    if oks:
-                        log("[SYSTEM]", "OK devices: " + ", ".join(oks))
-
-                self._last_sig = sig
-                self._last_all_ok = all_ok
+            # Sblocca gli stream quando tutti i dispositivi abilitati sono connessi
+            if not ready_event.is_set():
+                enabled = [d for d in self.devices if d.health.enabled]
+                if enabled and all(d.health.name in _logged_active for d in enabled):
+                    ready_event.set()
+                    log("[SETUP]", "Tutti i dispositivi collegati — avvio degli stream LSL ▶")
 
             time.sleep(0.2)
 
@@ -670,14 +658,15 @@ class ArduinoWiFiECGThread(threading.Thread):
                         now2 = float(local_clock())
                         self.last_data_at = now2
                         self.health.set(last_data_at=now2, first_data=True, detail="streaming")
-                        if not self._printed_first_data:
-                            log("[ArduinoWiFiECG]", f"FIRST SENSOR DATA received (label='{label}'). Streaming to LSL.")
-                            self._printed_first_data = True
 
-                        try:
-                            self.outlet.push_sample([float(v) for v in vals], timestamp=float(ts_host))
-                        except Exception as e:
-                            log("[ArduinoWiFiECG]", f"LSL push error: {e}")
+                        if ready_event.is_set():
+                            try:
+                                self.outlet.push_sample([float(v) for v in vals], timestamp=float(ts_host))
+                                if not self._printed_first_data:
+                                    log("[ArduinoWiFiECG]", "Primo campione LSL inviato.")
+                                    self._printed_first_data = True
+                            except Exception as e:
+                                log("[ArduinoWiFiECG]", f"LSL push error: {e}")
 
             now3 = float(local_clock())
 
@@ -762,15 +751,17 @@ class ArduinoUSBPolarThread(threading.Thread):
 
     def _push_label(self, lbl: str, values: List[float], t_dev_s: float) -> None:
         ts_host = self.sync.estimate_host_time(t_dev_s)
+        now = float(local_clock())
+        self.last_data_any_at = now
+        self.last_data_by_label[lbl] = now
+        self.health.set(last_data_at=now, first_data=True, detail="streaming")
+        if not ready_event.is_set():
+            return
         try:
             self.outlets[lbl].push_sample([float(v) for v in values], timestamp=float(ts_host))
-            now = float(local_clock())
-            self.last_data_any_at = now
-            self.last_data_by_label[lbl] = now
-            self.health.set(last_data_at=now, first_data=True, detail="streaming")
             if not self._printed_first_by_label.get(lbl, False):
                 sname = self.label_map.get(lbl, ("(unknown)", [], 0.0))[0]
-                log("[ArduinoUSBPolar]", f"FIRST SENSOR DATA pushed (label='{lbl}' -> LSL '{sname}').")
+                log("[ArduinoUSBPolar]", f"Primo campione LSL inviato (label='{lbl}' -> '{sname}').")
                 self._printed_first_by_label[lbl] = True
         except Exception as e:
             log("[ArduinoUSBPolar]", f"LSL push error ({lbl}): {e}")
@@ -782,7 +773,8 @@ class ArduinoUSBPolarThread(threading.Thread):
             return
 
         next_sync = 0.0
-        while not stop_event.is_set():
+        try:
+          while not stop_event.is_set():
             now = float(local_clock())
             if now >= next_sync:
                 self.send_sync()
@@ -792,10 +784,7 @@ class ArduinoUSBPolarThread(threading.Thread):
 
             for line in lines:
                 self.last_line_at = float(local_clock())
-
-                if not self._printed_first_line:
-                    log("[ArduinoUSBPolar]", "FIRST SERIAL LINE received.")
-                    self._printed_first_line = True
+                self._printed_first_line = True
 
                 for label, payload in split_messages(line):
                     if label == "T":
@@ -853,6 +842,10 @@ class ArduinoUSBPolarThread(threading.Thread):
                     self.last_warn_at = now3
 
             time.sleep(0.001)
+
+        except Exception as e:
+            self.health.set(state="ERROR", fatal_error=f"eccezione non gestita: {e}")
+            log("[ArduinoUSBPolar]", f"ERRORE fatale nel thread: {e}")
 
         try:
             if self.ser:
@@ -995,8 +988,9 @@ class EmotiBitThread(threading.Thread):
                 t_dev = float(ts[i])
                 ts_host = self._dev_to_host(t_dev, host_now)
                 vals = [float(sig[j][i]) for j in range(n_ch)]
-                outlet.push_sample(vals, timestamp=float(ts_host))
-                pushed += 1
+                if ready_event.is_set():
+                    outlet.push_sample(vals, timestamp=float(ts_host))
+                    pushed += 1
         except Exception:
             return pushed
 
