@@ -624,14 +624,16 @@ class PolarECGImputer:
         if not is_local_ext:
             return
 
-        # Sharpness check: in LOCAL_WIN samples before the peak the signal must
-        # already have changed by ≥ SHARP_FRAC of the total amplitude.
-        # R-peaks rise steeply (20–40 ms); T-waves rise slowly (80–150 ms).
+        # Sharpness check: in LOCAL_WIN samples (~38 ms) before the peak the signal
+        # must have changed by ≥ SHARP_FRAC of the candidate's own amplitude (amp).
+        # Using amp (not the full-window range) is critical: at normal heart rates
+        # the PRE+POST window (~0.65 s) spans two R-peaks, making the full-window
+        # range enormous and the threshold impossible even for real R-peaks.
+        # R-peaks rise steeply (20–40 ms upstroke) → upslope/amp ≈ 0.7–0.9 → pass.
+        # T-waves rise slowly (80–150 ms upstroke) → upslope/amp ≈ 0.1–0.3 → reject.
         slope_start = max(0, ci - self.LOCAL_WIN)
         upslope = abs(cval - self._buf_v[slope_start])
-        # amp computed below — use window range as proxy here
-        win_range = wmax - wmin
-        if win_range > 0 and upslope < win_range * self.SHARP_FRAC:
+        if amp > 0 and upslope < amp * self.SHARP_FRAC:
             return
 
         # Adaptive amplitude threshold: 40 % of recent peak EMA, or MIN_AMP_UV
