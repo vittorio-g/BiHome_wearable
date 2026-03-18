@@ -26,9 +26,9 @@ from pylsl import StreamInfo, StreamOutlet, local_clock
 # Feature flags
 # =====================================================
 
-ENABLE_ARDUINO_WIFI_ECG = True
+ENABLE_ARDUINO_WIFI_ECG = False
 ENABLE_ARDUINO_USB_POLAR = True
-ENABLE_EMOTIBIT = True
+ENABLE_EMOTIBIT = False
 
 # Weighted moving average on ECG (WiFi + Polar) and EmotiBit PPG.
 # Set to False to stream raw unfiltered values.
@@ -505,14 +505,13 @@ class PolarECGImputer:
 
     FS          = 130.0   # Hz  — must match POLAR_2.ino ECG output rate
     PRE_S       = 0.25    # window before R-peak (seconds)
-    POST_S      = 0.15    # window after R-peak (seconds) — short: R-peaks are sharp,
-                          # 0.15 s is enough to confirm the max; reduces marker delay
-                          # from ~52 samples (0.40 s) to ~20 samples (0.15 s).
+    POST_S      = 0.40    # window after  R-peak (seconds)
+    LOCAL_WIN   = 5       # half-width for local-max check (samples, ~38 ms at 130 Hz)
     MIN_RR_S    = 0.35    # fastest plausible heart rate (~170 bpm)
     MAX_RR_S    = 1.60    # slowest plausible heart rate (~37 bpm)
     REFRACT_S   = 0.25    # min time between two accepted peaks
-    PEAK_FRAC   = 0.80    # candidate must be ≥ 80 % of window range above min
-    MIN_AMP_UV  = 150.0   # µV — minimum window amplitude to attempt peak detection
+    AMP_FRAC    = 0.40    # beat must reach ≥ 40 % of the adaptive peak-amplitude EMA
+    MIN_AMP_UV  = 150.0   # µV — fallback threshold before EMA is initialised
     MAX_BEATS   = 8       # beats kept in template average
     MAX_RR_HIST = 10      # RR intervals kept for heart-rate estimate
 
@@ -532,6 +531,7 @@ class PolarECGImputer:
         self._rr_hist:      List[float]  = []
         self._last_peak_ts: Optional[float] = None
         self._since_peak    = self._refract   # start ready
+        self._peak_amp_ema: Optional[float]  = None  # adaptive amplitude estimate
 
         self._in_gap        = False
         self._gap_start_ts: Optional[float] = None
@@ -589,10 +589,10 @@ class PolarECGImputer:
 
         self._since_peak += 1
 
-        # R-peak detection is delayed by _post samples so we can verify
-        # that the candidate is a true local maximum of the post-window.
+        # R-peak detection: candidate is at position ci = buf_len - _post - 1.
+        # We wait _post samples after it to confirm it is a local extremum.
         n  = len(self._buf_v)
-        ci = n - self._post - 1        # candidate index in buffer
+        ci = n - self._post - 1
         if ci < self._pre:
             return
         if self._since_peak < self._refract:
@@ -602,16 +602,38 @@ class PolarECGImputer:
         win  = self._buf_v[ci - self._pre : ci + self._post + 1]
         wmin, wmax = min(win), max(win)
 
-        if (wmax - wmin) < self.MIN_AMP_UV:
+        # Local-max/min check over ±LOCAL_WIN samples — much less strict than
+        # requiring global max of the full window, robust to T-waves and noise.
+        lo = max(0, ci - self.LOCAL_WIN)
+        hi = min(n - 1, ci + self.LOCAL_WIN)
+        local = self._buf_v[lo : hi + 1]
+
+        pos_amp = cval - wmin   # amplitude as positive peak
+        neg_amp = wmax - cval   # amplitude as negative peak (inverted ECG)
+
+        if pos_amp >= neg_amp:
+            amp          = pos_amp
+            is_local_ext = (cval == max(local))
+        else:
+            amp          = neg_amp
+            is_local_ext = (cval == min(local))
+
+        if not is_local_ext:
             return
-        if cval != wmax:                          # must be the global peak
-            return
-        if cval < wmin + (wmax - wmin) * self.PEAK_FRAC:
+
+        # Adaptive amplitude threshold: 40 % of recent peak EMA, or MIN_AMP_UV
+        # as fallback before the EMA is initialised.
+        threshold = (self._peak_amp_ema * self.AMP_FRAC
+                     if self._peak_amp_ema is not None
+                     else self.MIN_AMP_UV)
+        if amp < threshold:
             return
 
         # ---- Valid R-peak ----
         peak_ts          = self._buf_t[ci]
         self._since_peak = 0
+        self._peak_amp_ema = (amp if self._peak_amp_ema is None
+                              else 0.8 * self._peak_amp_ema + 0.2 * amp)
 
         if self._last_peak_ts is not None:
             rr = peak_ts - self._last_peak_ts
