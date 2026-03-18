@@ -57,7 +57,9 @@ POLAR_SERIAL_PORT = "COM5"
 POLAR_SERIAL_BAUD = 921600
 
 POLAR_LABEL_MAP = {
-    "Sens": ("PolarH10_Sens", ["ecg","ax","ay","az"], 130.0),
+    # 'beat' is the last channel: 0 normally, 1 when an R-peak is confirmed.
+    # It is computed in Python (not from firmware) — see PolarECGImputer.
+    "Sens": ("PolarH10_Sens", ["ecg","ax","ay","az","beat"], 130.0),
 }
 
 # --- Sync cadence (seconds) ---
@@ -536,13 +538,18 @@ class PolarECGImputer:
     # Public API
     # ------------------------------------------------------------------
 
-    def push(self, ts: float, val: float) -> List[Tuple[float, float]]:
+    def push(self, ts: float, val: float) -> List[Tuple[float, float, bool]]:
         """Feed one sample (ts in device-seconds, val in µV or NaN).
 
-        Returns a list of (ts, ecg_val) pairs to emit:
-          - Normal:    [(ts, val)]
-          - Gap start: []  (NaN samples are silently consumed)
-          - Gap end:   [(imp_ts, imp_val), ..., (ts, val)]
+        Returns a list of (ts, ecg_val, is_beat) triples:
+          - Normal:    [(ts, val, is_beat)]      is_beat=True when R-peak confirmed
+          - Gap start: []                        NaN samples silently consumed
+          - Gap end:   [(imp_ts, imp_val, is_beat), ..., (ts, val, is_beat)]
+
+        NOTE: R-peak detection is delayed by POST_S (~0.4 s) because it waits for
+        the post-peak window to complete before confirming.  When is_beat=True on
+        a real sample at time T, the actual peak occurred at approximately T-POST_S.
+        Imputed beats (from gap filling) are marked at their exact predicted position.
         """
         import math
         if math.isnan(val):
@@ -551,7 +558,7 @@ class PolarECGImputer:
                 self._gap_start_ts = ts
             return []
 
-        imputed: List[Tuple[float, float]] = []
+        imputed: List[Tuple[float, float, bool]] = []
         if self._in_gap and self._gap_start_ts is not None:
             gap_dur = ts - self._gap_start_ts
             if 0.0 < gap_dur <= self._max_gap:
@@ -559,8 +566,10 @@ class PolarECGImputer:
             self._in_gap       = False
             self._gap_start_ts = None
 
+        prev_peak = self._last_peak_ts
         self._ingest(ts, val)
-        return imputed + [(ts, val)]
+        is_beat = (self._last_peak_ts is not None and self._last_peak_ts != prev_peak)
+        return imputed + [(ts, val, is_beat)]
 
     def has_template(self) -> bool:
         return self._template is not None and len(self._rr_hist) >= 2
@@ -638,7 +647,7 @@ class PolarECGImputer:
             return None
         return sum(self._rr_hist) / len(self._rr_hist)
 
-    def _fill(self, gap_start: float, gap_end: float) -> List[Tuple[float, float]]:
+    def _fill(self, gap_start: float, gap_end: float) -> List[Tuple[float, float, bool]]:
         if self._template is None or self._last_peak_ts is None:
             return []
         rr = self._rr_estimate()
@@ -652,11 +661,12 @@ class PolarECGImputer:
 
         ts_out  = [gap_start + i * dt for i in range(n)]
         vals    = [0.0] * n
+        is_beat = [False] * n
 
         # Phase-continuous beat placement: compute where in the RR cycle
         # we are at gap_start, then count forward by rr until gap_end.
-        phase          = (gap_start - self._last_peak_ts) % rr
-        beat_offset    = rr - phase           # seconds to first beat inside gap
+        phase       = (gap_start - self._last_peak_ts) % rr
+        beat_offset = rr - phase     # seconds to first beat inside gap
 
         while beat_offset < (gap_end - gap_start):
             ci = int(beat_offset * self.FS)
@@ -664,9 +674,12 @@ class PolarECGImputer:
                 idx = ci - self._pre + j
                 if 0 <= idx < n:
                     vals[idx] += v
+            # Mark the R-peak position (centre of the template window).
+            if 0 <= ci < n:
+                is_beat[ci] = True
             beat_offset += rr
 
-        return list(zip(ts_out, vals))
+        return [(ts_out[i], vals[i], is_beat[i]) for i in range(n)]
 
 
 # =====================================================
@@ -1020,11 +1033,12 @@ class ArduinoUSBPolarThread(threading.Thread):
             if ENABLE_SIGNAL_FILTER else {}
         )
 
-        # ECG imputer: fills BLE dropout gaps with synthetic beats.
-        self._ecg_imputers: Dict[str, PolarECGImputer] = (
-            {lbl: PolarECGImputer(max_gap_s=IMPUTER_MAX_GAP_S) for lbl in self.label_map}
-            if ENABLE_ECG_IMPUTATION else {}
-        )
+        # ECG imputer: always created for beat detection.
+        # max_gap_s=0 disables gap filling but keeps R-peak tracking for the beat channel.
+        _gap_s = float(IMPUTER_MAX_GAP_S) if ENABLE_ECG_IMPUTATION else 0.0
+        self._ecg_imputers: Dict[str, PolarECGImputer] = {
+            lbl: PolarECGImputer(max_gap_s=_gap_s) for lbl in self.label_map
+        }
 
     def connect(self) -> bool:
         self.health.set(state="CONNECTING", detail=f"{self.port}@{self.baud}")
@@ -1046,35 +1060,40 @@ class ArduinoUSBPolarThread(threading.Thread):
         serial_send(self.ser, f"SYNC:{seq}")
 
     def _push_label(self, lbl: str, values: List[float], t_dev_s: float) -> None:
-        # --- Imputation ---
-        # Feed ECG channel through imputer; it may return imputed (ts, ecg) pairs
-        # for a preceding gap, followed by the real sample.
+        # values = firmware channels only (ecg, ax, ay, az) — 'beat' appended here.
         imputer = self._ecg_imputers.get(lbl)
-        n_ch    = len(values)
+        n_fw    = len(values)   # firmware channel count (without beat)
 
-        if imputer is not None and n_ch > 0:
+        if imputer is not None and n_fw > 0:
+            raw = imputer.push(t_dev_s, values[0])
+            # raw = [(ts, ecg, is_beat), ...]  last entry is always the real sample.
             pairs: List[Tuple[float, List[float]]] = []
-            for imp_ts, imp_ecg in imputer.push(t_dev_s, values[0]):
-                # Imputed samples carry NaN for ACC channels (no data for the gap).
-                imp_vals = [imp_ecg] + [float('nan')] * (n_ch - 1)
+            for i, (imp_ts, imp_ecg, is_beat) in enumerate(raw):
+                beat_val  = 1.0 if is_beat else 0.0
+                is_real   = (i == len(raw) - 1)
+                if is_real:
+                    # Real sample: keep original ACC channels.
+                    imp_vals = [imp_ecg] + list(values[1:]) + [beat_val]
+                else:
+                    # Imputed sample: no ACC data for the gap.
+                    imp_vals = [imp_ecg] + [float('nan')] * (n_fw - 1) + [beat_val]
                 pairs.append((imp_ts, imp_vals))
         else:
-            pairs = [(t_dev_s, list(values))]
+            pairs = [(t_dev_s, list(values) + [0.0])]
 
-        # --- Health bookkeeping (once per real call, not per imputed sample) ---
+        # --- Health bookkeeping ---
         now = float(local_clock())
-        self.last_data_any_at          = now
-        self.last_data_by_label[lbl]   = now
+        self.last_data_any_at        = now
+        self.last_data_by_label[lbl] = now
         self.health.set(last_data_at=now, first_data=True, detail="streaming")
 
         if not ready_event.is_set():
             return
 
-        # --- Filter + push (each sample in pairs) ---
+        # --- Filter ECG channel, then push ---
         filt = self._polar_ecg_filters.get(lbl)
         try:
             for ts_dev, vals in pairs:
-                # Filter ECG channel only; ACC left unfiltered.
                 if filt is not None and len(vals) > 0:
                     vals = [filt.apply(vals[0])] + list(vals[1:])
                 ts_host = self.sync.estimate_host_time(ts_dev)
@@ -1125,8 +1144,9 @@ class ArduinoUSBPolarThread(threading.Thread):
 
                     if label in self.label_map and label in self.outlets:
                         _, ch_labels, _ = self.label_map[label]
-                        n_ch = len(ch_labels)
-                        parsed = parse_wrapped_sample(payload, n_ch)
+                        # 'beat' is the last channel — computed in Python, not from firmware.
+                        n_fw_ch = len(ch_labels) - 1
+                        parsed = parse_wrapped_sample(payload, n_fw_ch)
                         if parsed is None:
                             continue
                         t_dev_s, vals = parsed
