@@ -1,0 +1,20 @@
+# Windows
+desktop.ini
+Thumbs.db
+
+# R
+.Rhistory
+.RData
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+
+# Credenziali WiFi Arduino — mai in repo
+all_sensors/**/secrets.h
+
+# CSV generati (riproducibili dallo script import pyxdf.py)
+data/csv_export/
