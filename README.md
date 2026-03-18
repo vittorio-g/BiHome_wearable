@@ -150,6 +150,61 @@ lsl_viewer      # visualizza i segnali in tempo reale
 
 ---
 
+## Filtro lineare sui segnali
+
+I segnali ECG (WiFi e Polar H10) e PPG (EmotiBit) vengono opzionalmente filtrati in Python prima dell'invio all'outlet LSL tramite una **media mobile pesata causale** (no dipendenze esterne, puro Python).
+
+### Kernel usato
+
+```
+ECG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]   # finestra triangolare simmetrica a 5 tap
+PPG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]   # stesso kernel
+```
+
+La finestra triangolare assegna peso massimo al campione corrente (3) e pesi decrescenti ai campioni precedenti (2, 1), ottenendo un'attenuazione delle alte frequenze senza annullare i picchi del segnale.
+
+**Ritardo di gruppo:** ~2 campioni (causale).
+
+| Segnale | Frequenza | Ritardo introdotto |
+|---|---|---|
+| ECG WiFi | 250 Hz | ~8 ms |
+| ECG Polar H10 | ~130 Hz | ~15 ms |
+| PPG EmotiBit | ~25 Hz | ~80 ms |
+
+> Il ritardo è identico su tutti i campioni dello stesso stream, quindi **non altera l'allineamento temporale tra stream diversi** — i timestamp di ogni campione non vengono modificati, viene filtrato solo il valore numerico.
+
+### Canali filtrati
+
+- **ECG WiFi** (`ArduinoWiFi_ECG`): canale `ecg` — tutti i campioni passano per il filtro.
+- **Polar H10** (`PolarH10_Sens`): solo il canale `ecg` (indice 0) — i canali `ax`, `ay`, `az` vengono trasmessi **senza filtro**.
+- **EmotiBit PPG** (`EmotiBit_PPG`): tutti e tre i canali `ppg_0`, `ppg_1`, `ppg_2`.
+- **EmotiBit IMU / EDA / TEMP**: non filtrati.
+
+### Attivazione / disattivazione
+
+Basta cambiare il flag in cima a `BiHome_wearable.py`:
+
+```python
+ENABLE_SIGNAL_FILTER = True   # True = filtra, False = segnale grezzo
+```
+
+### Personalizzazione del kernel
+
+I pesi si cambiano direttamente in cima allo script (nella sezione `USER CONFIG`):
+
+```python
+ECG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]   # 5-tap triangolare (default)
+PPG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]
+
+# Esempi alternativi:
+# media mobile semplice 7 tap:  [1, 1, 1, 1, 1, 1, 1]
+# finestra più stretta 3 tap:   [1, 2, 1]
+```
+
+Qualunque lista di pesi positivi funziona — la classe `SignalFilter` normalizza automaticamente.
+
+---
+
 ## Come avviare l'acquisizione
 
 1. **Alimentare e connettere i dispositivi**:
@@ -162,6 +217,7 @@ lsl_viewer      # visualizza i segnali in tempo reale
    ENABLE_ARDUINO_WIFI_ECG = True   # ECG analogico WiFi
    ENABLE_ARDUINO_USB_POLAR = True  # Bridge Polar H10
    ENABLE_EMOTIBIT = True           # EmotiBit
+   ENABLE_SIGNAL_FILTER = True      # Filtro media mobile pesata su ECG e PPG
    ```
 
 3. **Avviare lo script**:

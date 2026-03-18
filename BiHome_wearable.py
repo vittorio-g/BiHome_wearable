@@ -30,6 +30,10 @@ ENABLE_ARDUINO_WIFI_ECG = True
 ENABLE_ARDUINO_USB_POLAR = True
 ENABLE_EMOTIBIT = True
 
+# Weighted moving average on ECG (WiFi + Polar) and EmotiBit PPG.
+# Set to False to stream raw unfiltered values.
+ENABLE_SIGNAL_FILTER = True
+
 # =====================================================
 # USER CONFIG
 # =====================================================
@@ -285,7 +289,17 @@ class ClockSync:
         except Exception:
             pass
 
-        self.outlet = StreamOutlet(info)
+        for _attempt in range(5):
+            try:
+                self.outlet = StreamOutlet(info)
+                break
+            except RuntimeError:
+                if _attempt == 4:
+                    raise RuntimeError(
+                        "could not create stream outlet after 5 attempts. "
+                        "Check if another LSL application or previous instance is running."
+                    )
+                time.sleep(1.0)
 
     def mark_request(self) -> int:
         t1 = float(local_clock())
@@ -393,7 +407,57 @@ def make_lsl_outlet(
             ch.append_child_value("type", str(stream_type).lower())
     except Exception:
         pass
-    return StreamOutlet(info)
+    for _attempt in range(5):
+        try:
+            return StreamOutlet(info)
+        except RuntimeError:
+            if _attempt == 4:
+                raise RuntimeError(
+                    "could not create stream outlet after 5 attempts. "
+                    "Check if another LSL application or previous instance is running."
+                )
+            time.sleep(1.0)
+
+# =====================================================
+# Signal filter — weighted moving average (pure Python)
+# =====================================================
+
+# 5-tap symmetric triangular weights: centre sample has weight 3, neighbours 2 and 1.
+# Group delay: ~2 samples (causal). At 250 Hz ECG → ~8 ms; at 25 Hz PPG → ~80 ms.
+# Change these lists to tune the filter (any length, any positive weights).
+ECG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]
+PPG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]
+
+class SignalFilter:
+    """Causal weighted moving average, pure Python, no dependencies.
+
+    During warm-up (fewer samples than the window length) the filter uses only
+    the available samples with the right-aligned tail of the weight vector, so
+    there is no startup bias from implicit zeros.
+    A NaN input flushes the buffer (gap in data → restart smoothly).
+    """
+
+    def __init__(self, weights: list):
+        self._w = [float(x) for x in weights]
+        self._n = len(self._w)
+        self._buf: list = []
+
+    def apply(self, x: float) -> float:
+        import math
+        if math.isnan(x):
+            self._buf = []
+            return x
+        self._buf.append(x)
+        if len(self._buf) > self._n:
+            del self._buf[0]
+        k = len(self._buf)
+        ws = self._w[self._n - k:]
+        total = sum(ws[i] * self._buf[i] for i in range(k))
+        return total / sum(ws)
+
+    def reset(self):
+        self._buf = []
+
 
 # =====================================================
 # TCP helpers
@@ -601,6 +665,8 @@ class ArduinoWiFiECGThread(threading.Thread):
         self.last_sync_warn_at: float = 0.0
         self._printed_first_data: bool = False
 
+        self._ecg_filter = SignalFilter(ECG_FILTER_WEIGHTS) if ENABLE_SIGNAL_FILTER else None
+
     def connect(self) -> bool:
         self.health.set(state="CONNECTING", detail=f"{self.ip}:{self.port}")
         try:
@@ -659,6 +725,8 @@ class ArduinoWiFiECGThread(threading.Thread):
                         if parsed is None:
                             continue
                         t_dev_s, vals = parsed
+                        if self._ecg_filter is not None:
+                            vals = [self._ecg_filter.apply(vals[0])]
                         ts_host = self.sync.estimate_host_time(t_dev_s)
 
                         now2 = float(local_clock())
@@ -736,6 +804,12 @@ class ArduinoUSBPolarThread(threading.Thread):
         self._printed_first_line: bool = False
         self._printed_first_by_label: Dict[str, bool] = {lbl: False for lbl in self.label_map.keys()}
 
+        # Filter only the ECG channel (index 0) of each Polar label; ACC is not filtered.
+        self._polar_ecg_filters: Dict[str, SignalFilter] = (
+            {lbl: SignalFilter(ECG_FILTER_WEIGHTS) for lbl in self.label_map}
+            if ENABLE_SIGNAL_FILTER else {}
+        )
+
     def connect(self) -> bool:
         self.health.set(state="CONNECTING", detail=f"{self.port}@{self.baud}")
         self.ser = serial_open(self.port, self.baud)
@@ -756,6 +830,10 @@ class ArduinoUSBPolarThread(threading.Thread):
         serial_send(self.ser, f"SYNC:{seq}")
 
     def _push_label(self, lbl: str, values: List[float], t_dev_s: float) -> None:
+        # Filter ECG channel (index 0) only; ACC channels are left unfiltered.
+        f = self._polar_ecg_filters.get(lbl)
+        if f is not None and len(values) > 0:
+            values = [f.apply(values[0])] + list(values[1:])
         ts_host = self.sync.estimate_host_time(t_dev_s)
         now = float(local_clock())
         self.last_data_any_at = now
@@ -793,6 +871,10 @@ class ArduinoUSBPolarThread(threading.Thread):
                 self._printed_first_line = True
 
                 for label, payload in split_messages(line):
+                    if label in ("INFO", "WARN", "ERR", "HELLO"):
+                        log("[PolarArduino]", f"{label}: {payload}")
+                        continue
+
                     if label == "T":
                         tt = parse_T_payload(payload)
                         if tt is None:
@@ -919,6 +1001,12 @@ class EmotiBitThread(threading.Thread):
         self.last_heartbeat_at: float = 0.0
         self._printed_first_data: bool = False
 
+        # One filter per PPG channel (ppg_0, ppg_1, ppg_2)
+        self._ppg_filters = (
+            [SignalFilter(PPG_FILTER_WEIGHTS) for _ in range(3)]
+            if ENABLE_SIGNAL_FILTER else None
+        )
+
         self._board = None
         self._board_id = None
 
@@ -953,7 +1041,7 @@ class EmotiBitThread(threading.Thread):
             return float(host_now)
         return float(t_dev - self.offset_ema)
 
-    def _drain_and_push(self, preset: int, ts_row: int, indices: List[int], outlet: StreamOutlet, label: str) -> int:
+    def _drain_and_push(self, preset: int, ts_row: int, indices: List[int], outlet: StreamOutlet, label: str, filters=None) -> int:
         try:
             count = int(self._board.get_board_data_count(preset))
         except Exception:
@@ -994,6 +1082,8 @@ class EmotiBitThread(threading.Thread):
                 t_dev = float(ts[i])
                 ts_host = self._dev_to_host(t_dev, host_now)
                 vals = [float(sig[j][i]) for j in range(n_ch)]
+                if filters is not None:
+                    vals = [filters[j].apply(vals[j]) for j in range(min(len(filters), n_ch))]
                 if ready_event.is_set():
                     outlet.push_sample(vals, timestamp=float(ts_host))
                     pushed += 1
@@ -1092,6 +1182,7 @@ class EmotiBitThread(threading.Thread):
                     indices=list(self._ppg_idx),
                     outlet=self.out_ppg,
                     label="PPG",
+                    filters=self._ppg_filters,
                 )
                 if self._eda_idx and self._temp_idx:
                     indices = [int(self._eda_idx[0]), int(self._temp_idx[0])]

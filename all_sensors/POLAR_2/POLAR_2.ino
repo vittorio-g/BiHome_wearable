@@ -34,37 +34,34 @@ const uint32_t BAUD = 921600;
 // ECG start payload
 const uint8_t ENABLE_ECG[] = { 0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00 };
 
+// ACC start payload: 50 Hz, 16-bit, 8G range
+// (range 8G = 0x08 è il valore standard del Polar BLE SDK; 2G ignorato silenziosamente da alcune versioni firmware)
+const uint8_t ENABLE_ACC[] = { 0x02, 0x02, 0x00, 0x01, 0x32, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00 };
+
 // ==============================
 // micros() 64-bit
 // ==============================
 static uint32_t last_us32 = 0;
 static uint32_t wrap32 = 0;
 
-// ==============================
-// Polar sensor clock → Arduino micros64 calibration
-//
-// I pacchetti PMD della Polar H10 contengono nei byte 1-8 un timestamp
-// a 64 bit in nanosecondi generato dall'orologio interno del sensore.
-// Questo timestamp rappresenta il momento di campionamento dell'ULTIMO
-// campione del batch. Usarlo come ancoraggio (invece del tempo di arrivo
-// BLE su Arduino) elimina la latenza variabile del connection interval
-// (~7.5–30 ms) che sfaserebbe la Polar rispetto all'ECG.
-//
-// Il clock della Polar (ns) è un dominio separato da Arduino micros64()
-// (us). Manteniamo una stima EMA dell'offset per convertire i timestamp
-// Polar nel dominio Arduino, in modo che il meccanismo NTP esistente
-// (Arduino ↔ PC) continui a funzionare invariato.
-// ==============================
 
-static bool     polar_clk_init    = false;
-static int64_t  polar_clk_off_us  = 0;   // EMA di (arduino_us - polar_ns/1000)
-static const float POLAR_CLK_ALPHA = 0.05f;
+// ==============================
+// Polar sensor clock → Arduino micros64 calibration (solo ECG)
+//
+// I pacchetti PMD ECG contengono nei byte 1-8 il timestamp del sensore
+// (ns, epoch del dispositivo Polar). Lo convertiamo in Arduino micros64
+// tramite un offset EMA, eliminando la latenza BLE variabile.
+//
+// ACC usa tempi di arrivo Arduino diretti (epoch diversa dall'ECG sull'H10).
+// ==============================
+static bool     polar_clk_init   = false;
+static int64_t  polar_clk_off_us = 0;
+static const float POLAR_CLK_ALPHA = 0.15f;  // τ ≈ 6 pacchetti ≈ 50ms
 
-// Aggiorna l'offset con la nuova misurazione arrivo BLE vs timestamp Polar.
-// Chiamare una volta per pacchetto PMD, prima di usare polarNsToArduinoUs().
 void updatePolarClock(uint64_t arrival_us64, uint64_t polar_ns) {
-  int64_t polar_us  = (int64_t)(polar_ns / 1000ULL);
-  int64_t sample    = (int64_t)arrival_us64 - polar_us;
+  if (polar_ns == 0) return;
+  int64_t polar_us = (int64_t)(polar_ns / 1000ULL);
+  int64_t sample   = (int64_t)arrival_us64 - polar_us;
   if (!polar_clk_init) {
     polar_clk_off_us = sample;
     polar_clk_init   = true;
@@ -76,7 +73,6 @@ void updatePolarClock(uint64_t arrival_us64, uint64_t polar_ns) {
   }
 }
 
-// Converte un timestamp Polar (ns) nel dominio Arduino micros64() (us).
 uint64_t polarNsToArduinoUs(uint64_t polar_ns) {
   return (uint64_t)((int64_t)(polar_ns / 1000ULL) + polar_clk_off_us);
 }
@@ -249,6 +245,7 @@ bool haveAccData = false;
 
 unsigned long lastNoDataWarnMs = 0;
 unsigned long ecgStartMs = 0;
+unsigned long accStartMs  = 0;  // per retry ACC
 
 // ==============================
 // Dashboard state
@@ -287,33 +284,6 @@ static int32_t read_bits_lsb_signed(const uint8_t* data, size_t nbytes, size_t b
   return sign_extend_u32(v, nbits);
 }
 
-// ==============================
-// ACC payload builder
-// ==============================
-void buildAccPayload(uint8_t *buf, size_t &len, uint16_t sampleRateHz) {
-  buf[0] = 0x02;
-  buf[1] = 0x02;
-
-  // setting: sample rate
-  buf[2] = 0x00;
-  buf[3] = 0x01;
-  buf[4] = (uint8_t)(sampleRateHz & 0xFF);
-  buf[5] = (uint8_t)((sampleRateHz >> 8) & 0xFF);
-
-  // setting: resolution 16
-  buf[6] = 0x01;
-  buf[7] = 0x01;
-  buf[8] = 0x10;
-  buf[9] = 0x00;
-
-  // setting: range 2G
-  buf[10] = 0x02;
-  buf[11] = 0x01;
-  buf[12] = 0x02;
-  buf[13] = 0x00;
-
-  len = 14;
-}
 
 // ==============================
 // Decode PMD -> buffers
@@ -332,8 +302,23 @@ void pushEcgSamples(const uint8_t *payload, int payloadN, uint64_t arrivalUs64) 
 
   if (!haveEcgData) {
     haveEcgData = true;
-    nextOutUs64 = arrivalUs64;
+    nextOutUs64 = firstTs;  // inizia dal primo campione del batch, non dall'ultimo
     Serial.println("INFO:FIRST_ECG_DATA");
+  } else {
+    int64_t gap = (int64_t)(nextOutUs64 - firstTs);
+    if (gap > (int64_t)ECG_PERIOD_US) {
+      // nextOutUs64 ha superato l'inizio del nuovo batch.
+      // Reset limitato: se il gap è < 2s è un normale ritardo BLE → torniamo
+      // a firstTs per processare i campioni in ordine.
+      // Se > 2s è una perdita reale → partiamo dall'inizio del batch senza
+      // tornare troppo indietro nel tempo (evita artefatti nel viewer).
+      if (gap < 2000000LL) {
+        nextOutUs64 = firstTs;
+      } else {
+        nextOutUs64 = firstTs;  // anche qui reset, ma segnaliamo la perdita
+        lastEcg_uV = NAN;       // mostra NaN per il periodo perso
+      }
+    }
   }
 }
 
@@ -399,38 +384,49 @@ void handlePmdData(const uint8_t *buf, int n, uint64_t arrivalUs64) {
   if (n < 10) return;
 
   uint8_t measType = buf[0];
-
-  // Byte 1-8: timestamp Polar (uint64 LE, nanosecondi dall'orologio interno
-  // del sensore). Rappresenta il momento di campionamento dell'ULTIMO
-  // campione del batch. Estraiamo questo valore e lo convertiamo nel
-  // dominio Arduino micros64() tramite l'offset EMA calibrato.
-  uint64_t polar_ts_ns = 0;
-  for (uint8_t i = 0; i < 8; i++) {
-    polar_ts_ns |= ((uint64_t)buf[1 + i]) << (8 * i);
-  }
-
   uint8_t frameType = buf[9];
-
   const uint8_t *payload = buf + 10;
   int payloadN = n - 10;
 
-  // Aggiorna la calibrazione clock Polar → Arduino con questo pacchetto,
-  // poi converti il timestamp del sensore nel dominio Arduino.
-  updatePolarClock(arrivalUs64, polar_ts_ns);
-  uint64_t lastSampleUs64 = polarNsToArduinoUs(polar_ts_ns);
-
   if (measType == 0x00) { // ECG
-    // lastSampleUs64 = timestamp Arduino dell'ULTIMO campione del batch
+    uint64_t polar_ts_ns = 0;
+    for (uint8_t i = 0; i < 8; i++) {
+      polar_ts_ns |= ((uint64_t)buf[1 + i]) << (8 * i);
+    }
+
+    uint64_t lastSampleUs64;
+    if (polar_ts_ns == 0) {
+      // Timestamp non disponibile in questo pacchetto → usa arrivo BLE
+      lastSampleUs64 = arrivalUs64;
+    } else {
+      updatePolarClock(arrivalUs64, polar_ts_ns);
+      lastSampleUs64 = polarNsToArduinoUs(polar_ts_ns);
+
+      // Sanity check: calibrazione ancora sporca se il timestamp convertito
+      // è >50ms nel futuro rispetto all'arrivo BLE. In quel caso reset
+      // calibrazione, svuota il buffer (nessun campione con timestamp errato)
+      // e usa il tempo di arrivo come fallback.
+      int64_t delta = (int64_t)lastSampleUs64 - (int64_t)arrivalUs64;
+      if (delta > 50000LL) {
+        polar_clk_init   = false;
+        polar_clk_off_us = 0;
+        ecgBuf.clear();
+        lastEcg_uV     = NAN;
+        lastSampleUs64 = arrivalUs64;
+      }
+    }
     pushEcgSamples(payload, payloadN, lastSampleUs64);
     return;
   }
 
   if (measType == 0x02) { // ACC
     bool isDelta = (frameType & 0x80) != 0;
-    if (isDelta) pushAccDelta(payload, payloadN, lastSampleUs64);
-    else         pushAccRaw(payload, payloadN, lastSampleUs64);
+    if (isDelta) pushAccDelta(payload, payloadN, arrivalUs64);
+    else         pushAccRaw(payload, payloadN, arrivalUs64);
     return;
   }
+
+  Serial.print("WARN:PMD_unknown_type=0x"); Serial.println(measType, HEX);
 }
 
 // ==============================
@@ -460,7 +456,10 @@ bool connectAndDiscover() {
     pmdData    = pmdService.characteristic(PMD_DATA_UUID);
     if (!pmdControl || !pmdData) { polar.disconnect(); return false; }
 
-    pmdControl.subscribe();
+    // NON sottoscrivere pmdControl: la Polar invia la risposta F0 come
+    // indication BLE che richiede un ATT confirmation. ArduinoBLE non lo
+    // manda, causando un deadlock che blocca il comando ACC successivo.
+    // Le risposte F0 non ci servono — ignoriamo il control point in ricezione.
     pmdData.subscribe();
 
     return true;
@@ -483,16 +482,13 @@ bool sendStartECG() {
 }
 
 bool sendStartACC() {
-  uint8_t accPayload[32];
-  size_t accPayloadLen = 0;
-  buildAccPayload(accPayload, accPayloadLen, ACC_SAMPLE_RATE_HZ);
-
-  if (!pmdControl.writeValue(accPayload, accPayloadLen)) {
+  if (!pmdControl.writeValue(ENABLE_ACC, sizeof(ENABLE_ACC))) {
     Serial.println("ERR:ACC_start_write_failed");
     return false;
   }
 
   accStartSent = true;
+  accStartMs   = millis();
   Serial.println("INFO:ACC_START_SENT");
   return true;
 }
@@ -547,8 +543,6 @@ void resetDataState() {
 
   nextOutUs64 = 0;
 
-  // Reset calibrazione clock Polar: a ogni riconnessione il sensore può
-  // avere un clock offset diverso, quindi ripartiamo da zero.
   polar_clk_init   = false;
   polar_clk_off_us = 0;
 }
@@ -609,21 +603,21 @@ void loop() {
       delay(200);
       return;
     }
-    delay(80);
+    delay(150);  // pausa più lunga per dare tempo alla Polar di processare
   }
 
-  // drena risposte control point
-  for (int i = 0; i < 4; i++) {
-    BLE.poll();
-    if (pmdControl && pmdControl.valueUpdated()) {
-      uint8_t buf[64];
-      int n = pmdControl.readValue(buf, sizeof(buf));
-      (void)n;
+  // avvia ACC subito dopo ECG (non aspettare haveEcgData)
+  if (connected && ecgStartSent && !accStartSent) {
+    delay(100);
+    if (!sendStartACC()) {
+      delay(200);
+      return;
     }
+    delay(150);
   }
 
   // drena più notifiche PMD per loop
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 16; i++) {
     BLE.poll();
     if (!(pmdData && pmdData.valueUpdated())) break;
 
@@ -635,10 +629,11 @@ void loop() {
     }
   }
 
-  // solo dopo il primo ECG, avvia ACC
-  if (connected && ecgStartSent && haveEcgData && !accStartSent) {
-    if (sendStartACC()) {
-      delay(40);
+  // retry ACC se non arrivano dati entro 5 secondi
+  if (connected && accStartSent && !haveAccData) {
+    if (millis() - accStartMs > 5000) {
+      Serial.println("WARN:NO_ACC_DATA_RETRY");
+      accStartSent = false;
     }
   }
 
@@ -659,10 +654,12 @@ void loop() {
     }
   }
 
-  // dashboard output: parte appena c'è ECG
+  // dashboard output: un campione per iterazione — niente burst.
+  // Il batch BLE viene spalmato su più loop() consecutivi invece di essere
+  // emesso tutto in una volta, dando al viewer una curva fluida.
   if (haveEcgData) {
     uint64_t now = readMicros64();
-    while ((int64_t)(now - nextOutUs64) >= 0) {
+    if ((int64_t)(now - nextOutUs64) >= 0) {
       emitDashboardRow(nextOutUs64);
       nextOutUs64 += (uint64_t)OUT_PERIOD_US;
     }

@@ -136,6 +136,23 @@ void pollClientCommands() {
 }
 
 // ------------------------------
+// Moving average 5 punti (riduce rumore ADC e interferenze elettriche)
+// ------------------------------
+static float ecgHistory[5] = {0, 0, 0, 0, 0};
+static uint8_t ecgHistIdx = 0;
+static bool ecgHistFull = false;
+
+float ecgMovingAvg(float newVal) {
+  ecgHistory[ecgHistIdx] = newVal;
+  ecgHistIdx = (ecgHistIdx + 1) % 5;
+  if (ecgHistIdx == 0) ecgHistFull = true;
+  uint8_t n = ecgHistFull ? 5 : ecgHistIdx;
+  float sum = 0;
+  for (uint8_t i = 0; i < n; i++) sum += ecgHistory[i];
+  return sum / n;
+}
+
+// ------------------------------
 // Emit ECG sample
 // ------------------------------
 void sendEcgSample(uint64_t t_us64, float ecg_mV) {
@@ -216,7 +233,7 @@ void loop() {
       uint64_t t1_64 = readMicros64();
 
       uint64_t t_mid_64 = t0_64 + ((t1_64 - t0_64) / 2ULL);
-      float ecg_mV = adcToMilliVolt(raw);
+      float ecg_mV = ecgMovingAvg(adcToMilliVolt(raw));
 
       sendEcgSample(t_mid_64, ecg_mV);
     }
