@@ -509,13 +509,12 @@ class PolarECGImputer:
     LOCAL_WIN   = 5       # half-width for local-max check (samples, ~38 ms at 130 Hz)
     MIN_RR_S    = 0.35    # fastest plausible heart rate (~170 bpm)
     MAX_RR_S    = 1.60    # slowest plausible heart rate (~37 bpm)
-    REFRACT_S   = 0.35    # min time between two accepted peaks — 0.35 s blocks T-waves
-                          # (T occurs ~200–350 ms after R; with POST_S=0.40 s delay the
-                          # T-wave candidate fires ~0.25 s after R confirmation, just past
-                          # a 0.25 s refract but safely inside a 0.35 s refract)
+    REFRACT_S   = 0.35    # min time between two accepted peaks
     AMP_FRAC    = 0.55    # beat must reach ≥ 55 % of the adaptive peak-amplitude EMA
-    MIN_AMP_UV  = 400.0   # µV — fallback threshold before EMA is initialised; set high
-                          # so the first detected peak is a true R-peak, not a T/P wave
+    MIN_AMP_UV  = 400.0   # µV — fallback threshold before EMA is initialised
+    SHARP_FRAC  = 0.40    # sharpness: signal must change ≥ 40 % of amplitude in LOCAL_WIN
+                          # samples before the peak — R-peaks (20–40 ms upstroke) pass,
+                          # T-waves (80–150 ms upstroke) are rejected
     MAX_BEATS   = 8       # beats kept in template average
     MAX_RR_HIST = 10      # RR intervals kept for heart-rate estimate
 
@@ -623,6 +622,16 @@ class PolarECGImputer:
             is_local_ext = (cval == min(local))
 
         if not is_local_ext:
+            return
+
+        # Sharpness check: in LOCAL_WIN samples before the peak the signal must
+        # already have changed by ≥ SHARP_FRAC of the total amplitude.
+        # R-peaks rise steeply (20–40 ms); T-waves rise slowly (80–150 ms).
+        slope_start = max(0, ci - self.LOCAL_WIN)
+        upslope = abs(cval - self._buf_v[slope_start])
+        # amp computed below — use window range as proxy here
+        win_range = wmax - wmin
+        if win_range > 0 and upslope < win_range * self.SHARP_FRAC:
             return
 
         # Adaptive amplitude threshold: 40 % of recent peak EMA, or MIN_AMP_UV
