@@ -72,7 +72,7 @@ MAX_ABS_DELAY_S = 0.200
 MAX_ABS_OFFSET_JUMP_S = 0.100
 
 # --- EmotiBit (BrainFlow) ---
-EMOTIBIT_IP = "192.168.50.163"
+EMOTIBIT_IP = ""  # empty → BrainFlow auto-discovers via UDP broadcast
 EMOTIBIT_TIMEOUT = 5
 EMOTIBIT_POLL_INTERVAL = 0.05
 EMOTIBIT_SERIAL_NUMBER = ""
