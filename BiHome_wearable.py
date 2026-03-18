@@ -453,6 +453,12 @@ def serial_open(port: str, baud: int):
         return ser
     except Exception as e:
         log("[SERIAL]", f"Cannot open {port}: {e}")
+        try:
+            from serial.tools import list_ports
+            available = [p.device for p in list_ports.comports()]
+            log("[SERIAL]", f"Porte seriali disponibili: {available if available else '(nessuna)'}")
+        except Exception:
+            pass
         return None
 
 def serial_send(ser, line: str) -> None:
