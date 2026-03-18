@@ -511,7 +511,8 @@ class PolarECGImputer:
     MAX_RR_S    = 1.60    # slowest plausible heart rate (~37 bpm)
     REFRACT_S   = 0.35    # min time between two accepted peaks
     AMP_FRAC    = 0.55    # beat must reach ≥ 55 % of the adaptive peak-amplitude EMA
-    MIN_AMP_UV  = 400.0   # µV — fallback threshold before EMA is initialised
+    MIN_AMP_UV  = 60.0    # µV — fallback threshold before EMA is initialised
+                          # (local amplitude over ±5 samples / 38 ms, not full window)
     SHARP_FRAC  = 0.40    # sharpness: signal must change ≥ 40 % of amplitude in LOCAL_WIN
                           # samples before the peak — R-peaks (20–40 ms upstroke) pass,
                           # T-waves (80–150 ms upstroke) are rejected
@@ -538,6 +539,7 @@ class PolarECGImputer:
 
         self._in_gap        = False
         self._gap_start_ts: Optional[float] = None
+        self._last_beat_output_ts: Optional[float] = None  # wall-clock guard for output
 
     # ------------------------------------------------------------------
     # Public API
@@ -587,7 +589,22 @@ class PolarECGImputer:
                 self._last_peak_ts = self._last_peak_ts + rr
                 is_beat = True
 
-        return imputed + [(ts, val, is_beat)]
+        # Output guard: never emit two is_beat=True events within MIN_RR_S of each
+        # other in stream time.  This catches the gap-prediction + real-detection
+        # double: both fire within ~50 ms even though the underlying beats are ~RR apart.
+        results = imputed + [(ts, val, is_beat)]
+        filtered = []
+        for (evt_ts, evt_val, evt_beat) in results:
+            if evt_beat:
+                if (self._last_beat_output_ts is None
+                        or evt_ts - self._last_beat_output_ts >= self.MIN_RR_S):
+                    self._last_beat_output_ts = evt_ts
+                    filtered.append((evt_ts, evt_val, True))
+                else:
+                    filtered.append((evt_ts, evt_val, False))  # suppress double
+            else:
+                filtered.append((evt_ts, evt_val, False))
+        return filtered
 
     def has_template(self) -> bool:
         return self._template is not None and len(self._rr_hist) >= 2
@@ -663,7 +680,11 @@ class PolarECGImputer:
             return
 
         # ---- Valid R-peak ----
-        peak_ts          = self._buf_t[ci]
+        peak_ts = self._buf_t[ci]
+        # Enforce minimum RR even if gap prediction already advanced _last_peak_ts.
+        if (self._last_peak_ts is not None
+                and peak_ts - self._last_peak_ts < self.MIN_RR_S):
+            return
         self._since_peak = 0
         self._peak_amp_ema = (amp if self._peak_amp_ema is None
                               else 0.8 * self._peak_amp_ema + 0.2 * amp)
