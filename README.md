@@ -43,7 +43,9 @@ All_sensors/
 │       └── Comparison_ecg.xdf  # Registrazione per validazione ECG vs Polar
 │
 └── Viewer/
-    └── How to.txt              # Istruzioni rapide per visualizzare gli stream
+    ├── How to.txt              # Istruzioni rapide per visualizzare gli stream
+    ├── lsl_viewer.py           # Viewer LSL custom (pyqtgraph) con diagnostica CSV
+    └── diag/                   # CSV diagnostiche auto-generate dal viewer
 ```
 
 ---
@@ -140,12 +142,11 @@ Sul PC questi vengono ricostruiti da `(wrap, us32)` inviati via seriale/TCP.
 pip install pylsl pyserial brainflow numpy
 ```
 
-Per la visualizzazione degli stream (ambiente separato):
+Per il viewer custom:
 
 ```bash
-conda activate streamviewer310
-lsl_status      # lista gli stream attivi
-lsl_viewer      # visualizza i segnali in tempo reale
+pip install pylsl pyqtgraph PyQt5 numpy
+python Viewer/lsl_viewer.py
 ```
 
 ---
@@ -321,9 +322,9 @@ Qualunque lista di pesi positivi funziona — la classe `SignalFilter` normalizz
 
 5. **Monitorare** (opzionale, terminale separato):
    ```bash
-   conda activate streamviewer310
-   lsl_viewer
+   python Viewer/lsl_viewer.py
    ```
+   Il viewer custom scopre automaticamente tutti gli stream LSL attivi e mostra un grafico per canale con toggle per stream, scala Y auto/manuale e salvataggio diagnostiche CSV in `Viewer/diag/`.
 
 ---
 
@@ -389,6 +390,71 @@ La posizione 3D viene stimata per trilaterazione dalle 3 distanze misurate.
 | `INFO:*` | stringa | Messaggi diagnostici |
 | `WARN:*` | stringa | Avvisi |
 | `ERR:*` | stringa | Errori |
+
+---
+
+## TODO CRITICO
+
+- **Migliorare la qualità del segnale ECG Polar H10**: il pipeline attuale (Polar H10 → BLE → Arduino NINA-W102 → Serial → Python → LSL) presenta una perdita di dati significativa che si manifesta come gap nel tracciato ECG. Le cause probabili includono:
+  - Perdita di notifiche BLE a livello del modulo NINA-W102 (buffer limitato, polling non sufficientemente frequente)
+  - Overflow del buffer seriale su Windows durante le operazioni di SYNC
+  - Latenza nel parsing Python quando il thread è occupato
+
+  L'architettura producer-consumer introdotta in `BiHome_wearable.py` (thread dedicato alla lettura seriale + coda + worker) e il buffer seriale da 128 KB hanno migliorato la situazione ma non risolto completamente il problema. È necessario investigare ulteriormente, possibilmente con logging statistico (`STATS` ogni 10 s) per identificare il collo di bottiglia esatto.
+
+---
+
+## Viewer LSL custom (`Viewer/lsl_viewer.py`)
+
+Viewer basato su **pyqtgraph + PyQt5** che scopre automaticamente tutti gli stream LSL attivi e li visualizza in tempo reale.
+
+### Funzionalità
+
+- **Auto-discovery** di tutti gli stream LSL disponibili
+- **Un grafico per canale**, raggruppati per stream
+- **Toggle per stream**: pulsante per abilitare/disabilitare tutti i canali di uno stream
+- **Scala Y**: auto-scale o range manuale per ogni canale
+- **Asse X condiviso** per stream (ogni stream segue i propri timestamp)
+- **Gap detection**: inserisce NaN quando il segnale si interrompe per >3× il periodo atteso, evitando linee orizzontali spurie
+- **Dedup mediana**: rimuove campioni duplicati/interpolati (artefatti dell'imputer) tramite filtro sulla distanza temporale
+- **Salvataggio CSV diagnostiche** in `Viewer/diag/` con timestamp, valori per canale e flag beat
+- **Buffer circolare numpy** per performance O(1) su append e snapshot
+
+### Dipendenze
+
+```bash
+pip install pylsl pyqtgraph PyQt5 numpy
+```
+
+### Avvio
+
+```bash
+python Viewer/lsl_viewer.py
+```
+
+---
+
+## Architettura serial reader (`BiHome_wearable.py`)
+
+La lettura della porta seriale per il bridge Polar H10 usa un'architettura **producer-consumer** per minimizzare la perdita di dati:
+
+```
+[Serial RX 128KB buffer]
+        │
+        ▼
+  _serial_reader() ── thread dedicato, solo lettura seriale
+        │
+        ▼
+  Queue(maxsize=50000) ── linee di testo
+        │
+        ▼
+  run() ── worker thread: parsing, imputer, push LSL
+```
+
+- Il **producer** (`_serial_reader`) legge fino a 64 KB per ciclo e mette le linee nella coda
+- Il **consumer** (`run`) drena fino a 500 linee per batch, parsifica i dati, esegue l'imputer ECG e invia a LSL
+- **STATS** ogni 10 secondi: `lines` lette, `pushed` a LSL, `q_depth`, `expected` — utile per diagnosticare dove avviene la perdita dati
+- Il buffer seriale RX è impostato a **128 KB** (default Windows: 4 KB)
 
 ---
 

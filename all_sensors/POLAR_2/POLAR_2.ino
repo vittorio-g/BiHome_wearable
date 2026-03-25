@@ -164,8 +164,8 @@ struct RingACC {
   }
 };
 
-RingECG<512> ecgBuf;
-RingACC<512> accBuf;
+RingECG<400> ecgBuf;   // ~3s @ 130Hz
+RingACC<200> accBuf;   // ~4s @ 50Hz
 
 // ==============================
 // PC commands
@@ -497,8 +497,12 @@ bool sendStartACC() {
 // Dashboard output
 // ==============================
 void emitDashboardRow(uint64_t t_tick) {
-  ecgBuf.popUntil(t_tick, lastEcg_uV);
+  bool hadEcg = ecgBuf.popUntil(t_tick, lastEcg_uV);
   accBuf.popUntil(t_tick, lastAx_mg, lastAy_mg, lastAz_mg);
+
+  // Niente campione ECG per questo tick → non emettiamo nulla
+  // (evita l'artefatto "fill" causato dal valore costante tenuto).
+  if (!hadEcg) return;
 
   uint32_t w, us32;
   splitMicros64(t_tick, w, us32);

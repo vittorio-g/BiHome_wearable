@@ -812,6 +812,13 @@ def serial_open(port: str, baud: int):
 
     try:
         ser = serial.Serial(port=port, baudrate=int(baud), timeout=0.0)
+        # Ingrandisci i buffer seriali OS (default Windows = 4KB, troppo poco
+        # per 130Hz × ~60 byte/linea = 7.8 KB/s — se il thread è occupato
+        # per >0.5s il buffer overflow causa perdita dati).
+        try:
+            ser.set_buffer_size(rx_size=131072, tx_size=16384)  # 128KB RX
+        except Exception:
+            pass  # non tutti gli OS/driver supportano set_buffer_size
         time.sleep(1.5)
         ser.reset_input_buffer()
         log("[SERIAL]", f"Opened {port} @ {baud}")
@@ -834,7 +841,7 @@ def serial_send(ser, line: str) -> None:
     except Exception as e:
         log("[SERIAL]", f"Send error ({line!r}): {e}")
 
-def serial_read_lines(ser, buffer: str, max_bytes: int = 8192) -> Tuple[str, List[str]]:
+def serial_read_lines(ser, buffer: str, max_bytes: int = 65536) -> Tuple[str, List[str]]:
     try:
         n = ser.in_waiting
         if n <= 0:
@@ -1183,23 +1190,84 @@ class ArduinoUSBPolarThread(threading.Thread):
         except Exception as e:
             log("[ArduinoUSBPolar]", f"LSL push error ({lbl}): {e}")
 
+    # ── producer-consumer architecture ──────────────────────────────
+    # Thread 1 (_serial_reader): ONLY reads serial bytes into a Queue.
+    #   Runs in a tight loop with NO processing — never misses data.
+    # Thread 2 (run / main worker): takes lines from Queue, parses,
+    #   runs imputer, pushes to LSL.  Can be as slow as it needs.
+    # ─────────────────────────────────────────────────────────────────
+
+    def _serial_reader(self):
+        """Dedicated serial reader — runs in its own daemon thread.
+        Only reads bytes and splits into lines → self._line_q.
+        Never blocks on anything except serial I/O."""
+        import queue
+        buf = ""
+        ser = self.ser
+        while not stop_event.is_set():
+            try:
+                n = ser.in_waiting
+                if n <= 0:
+                    time.sleep(0.0002)  # 0.2ms idle poll
+                    continue
+                chunk = ser.read(min(n, 65536))
+                if not chunk:
+                    continue
+                buf += chunk.decode("utf-8", errors="replace")
+                parts = buf.split("\n")
+                buf = parts[-1]
+                for p in parts[:-1]:
+                    p = p.strip()
+                    if p:
+                        self._line_q.put(p)
+            except Exception as e:
+                log("[SerialReader]", f"err: {e}")
+                time.sleep(0.01)
+
     def run(self):
+        import queue
         if not ENABLE_ARDUINO_USB_POLAR:
             return
         if not self.connect():
             return
 
+        # line queue: serial reader → worker
+        self._line_q: queue.Queue = queue.Queue(maxsize=50000)
+
+        # start dedicated serial reader thread
+        reader_t = threading.Thread(target=self._serial_reader, daemon=True,
+                                    name="PolarSerialReader")
+        reader_t.start()
+        log("[ArduinoUSBPolar]", "Serial reader thread started (producer-consumer mode).")
+
         next_sync = 0.0
+        _lines_read = 0
+        _samples_pushed = 0
+        _last_stats = float(local_clock())
+
         try:
           while not stop_event.is_set():
             now = float(local_clock())
+
+            # SYNC: still on this thread (serial writes are fast and non-blocking)
             if now >= next_sync:
                 self.send_sync()
                 next_sync = now + float(SYNC_INTERVAL_S)
 
-            self.buf, lines = serial_read_lines(self.ser, self.buf)
+            # Drain the line queue (all available lines, up to 500 per batch)
+            batch = []
+            for _ in range(500):
+                try:
+                    batch.append(self._line_q.get_nowait())
+                except Exception:
+                    break
 
-            for line in lines:
+            if not batch:
+                time.sleep(0.002)  # 2ms — nothing to process
+                continue
+
+            for line in batch:
+                _lines_read += 1
                 self.last_line_at = float(local_clock())
                 self._printed_first_line = True
 
@@ -1222,15 +1290,25 @@ class ArduinoUSBPolarThread(threading.Thread):
 
                     if label in self.label_map and label in self.outlets:
                         _, ch_labels, _ = self.label_map[label]
-                        # 'beat' is the last channel — computed in Python, not from firmware.
                         n_fw_ch = len(ch_labels) - 1
                         parsed = parse_wrapped_sample(payload, n_fw_ch)
                         if parsed is None:
                             continue
                         t_dev_s, vals = parsed
                         self._push_label(label, vals, t_dev_s)
+                        _samples_pushed += 1
 
+            # periodic stats (every 10s)
             now3 = float(local_clock())
+            if (now3 - _last_stats) >= 10.0:
+                qsz = self._line_q.qsize()
+                expected = 130 * (now3 - _last_stats)
+                log("[ArduinoUSBPolar]",
+                    f"STATS: lines={_lines_read}, pushed={_samples_pushed}, "
+                    f"q_depth={qsz}, expected~{expected:.0f}")
+                _lines_read = 0
+                _samples_pushed = 0
+                _last_stats = now3
 
             if self.connected_at is not None and self.last_line_at is None:
                 if (now3 - self.connected_at) >= NO_DATA_WARN_S and (now3 - self.last_warn_at) >= NO_DATA_REPEAT_S:
@@ -1262,8 +1340,6 @@ class ArduinoUSBPolarThread(threading.Thread):
                 if age_any >= NO_DATA_WARN_S and (now3 - self.last_warn_at) >= NO_DATA_REPEAT_S:
                     log("[ArduinoUSBPolar]", f"WARNING: NO PUSHED SENSOR DATA for {age_any:.1f}s (stream stalled?).")
                     self.last_warn_at = now3
-
-            time.sleep(0.001)
 
         except Exception as e:
             self.health.set(state="ERROR", fatal_error=f"eccezione non gestita: {e}")
