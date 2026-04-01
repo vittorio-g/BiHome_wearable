@@ -20,11 +20,7 @@ import pylsl
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-# GPU-accelerated rendering + skip antialias for speed
-try:
-    pg.setConfigOptions(useOpenGL=True, antialias=False, enableExperimental=True)
-except Exception:
-    pg.setConfigOptions(antialias=False)
+pg.setConfigOptions(antialias=False)
 
 # ── constants ────────────────────────────────────────────────────────────────
 MAX_BUF = 50_000          # ~6 min @ 130 Hz
@@ -485,7 +481,6 @@ class Viewer(QtWidgets.QMainWindow):
             pen = pg.mkPen(color=cr.color, width=1)
             cr.curve = p.plot(pen=pen, connect="finite")
             cr.curve.setClipToView(True)
-            cr.curve.setDownsampling(auto=True, mode='peak')
             # Add beat scatter for ECG channels
             if cr.label.lower().endswith("/ecg"):
                 cr.beat_scatter = pg.ScatterPlotItem(
