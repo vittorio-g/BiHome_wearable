@@ -469,6 +469,15 @@ class Viewer(QtWidgets.QMainWindow):
                                f"{st.srate:.0f}Hz, {len(st.ch_labels)}ch)</small>")
         lbl.setWordWrap(True)
         hl.addWidget(lbl, stretch=1)
+        rec_cb = QtWidgets.QCheckBox("REC")
+        rec_cb.setChecked(True)
+        rec_cb.setToolTip("Include this stream in recording")
+        rec_cb.setStyleSheet("QCheckBox { color: #ff6666; }")
+        hl.addWidget(rec_cb)
+        # Store reference for recording filter
+        if not hasattr(self, '_stream_rec_cbs'):
+            self._stream_rec_cbs: Dict[str, QtWidgets.QCheckBox] = {}
+        self._stream_rec_cbs[key] = rec_cb
         tb = QtWidgets.QPushButton("Toggle all"); tb.setFixedWidth(80)
         hl.addWidget(tb)
         self.ch_lay.addWidget(hw)
@@ -772,19 +781,17 @@ class Viewer(QtWidgets.QMainWindow):
         os.makedirs(RECORDINGS_DIR, exist_ok=True)
         filepath = os.path.join(RECORDINGS_DIR, name)
 
-        # LabRecorderCLI records all streams matching the predicate.
-        # 'type="BIO"' captures our sensor streams; use empty pred for ALL.
-        # Using a broad predicate to capture everything:
-        cmd = [LABRECORDER_CLI, filepath, "name='PolarH10_Sens'"]
-        # If there are more streams, capture all types:
-        # Build predicates for all currently discovered streams
+        # Build predicates only for streams with REC checkbox checked
         preds = []
         for key, st in self.streams.items():
-            preds.append(f"name='{st.name}'")
+            cb = self._stream_rec_cbs.get(key)
+            if cb is None or cb.isChecked():
+                preds.append(f"name='{st.name}'")
 
         if not preds:
-            # Fallback: record anything
-            preds = ["type='BIO'"]
+            self.rec_status.setText("ERROR: No streams selected for recording")
+            self.rec_btn.setChecked(False)
+            return
 
         cmd = [LABRECORDER_CLI, filepath] + preds
 
@@ -800,6 +807,9 @@ class Viewer(QtWidgets.QMainWindow):
             self._rec_start_time = time.time()
             self.rec_btn.setText("  STOP")
             self.rec_name.setEnabled(False)
+            # Freeze REC checkboxes during recording
+            for cb in self._stream_rec_cbs.values():
+                cb.setEnabled(False)
             self.rec_status.setText(f"Recording to: {name}")
             self.rec_status.setStyleSheet("font-size: 11px; color: #ff4444;")
             print(f"[REC] Started: {' '.join(cmd)}")
@@ -828,6 +838,9 @@ class Viewer(QtWidgets.QMainWindow):
         fname = os.path.basename(self._rec_file)
         self.rec_btn.setText("  REC")
         self.rec_name.setEnabled(True)
+        # Re-enable REC checkboxes
+        for cb in self._stream_rec_cbs.values():
+            cb.setEnabled(True)
         self.rec_status.setStyleSheet("font-size: 11px; color: #44cc44;")
         print(f"[REC] Stopped. File: {self._rec_file} ({elapsed:.1f}s)")
 
