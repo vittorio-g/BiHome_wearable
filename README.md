@@ -42,10 +42,19 @@ All_sensors/
 │   └── Comparison_ecg/
 │       └── Comparison_ecg.xdf  # Registrazione per validazione ECG vs Polar
 │
+├── LabRecorder/                # LabRecorder v1.16.4 (binari gitignored, solo config)
+│   ├── LabRecorderCLI.exe      # CLI per registrazione XDF da Python
+│   └── LabRecorder.cfg         # Configurazione
+│
+├── diag_bleak.py               # Diagnostica BLE diretta (test perdita dati)
+├── diag_serial.py              # Diagnostica seriale Arduino (test perdita dati)
+│
 └── Viewer/
-    ├── How to.txt              # Istruzioni rapide per visualizzare gli stream
-    ├── lsl_viewer.py           # Viewer LSL custom (pyqtgraph) con diagnostica CSV
-    └── diag/                   # CSV diagnostiche auto-generate dal viewer
+    ├── lsl_viewer.py           # Viewer LSL custom (pyqtgraph) con UI BiHome
+    ├── fonts/                  # Font Montserrat (bundled)
+    ├── recordings/             # Registrazioni XDF + CSV (gitignored)
+    ├── diag/                   # CSV diagnostiche auto-generate
+    └── viewer_settings.json    # Impostazioni UI persistenti
 ```
 
 ---
@@ -141,14 +150,7 @@ Sul PC questi vengono ricostruiti da `(wrap, us32)` inviati via seriale/TCP.
 ## Dipendenze Python
 
 ```bash
-pip install pylsl pyserial brainflow numpy bleak
-```
-
-Per il viewer custom:
-
-```bash
-pip install pylsl pyqtgraph PyQt5 numpy
-python Viewer/lsl_viewer.py
+pip install pylsl pyserial brainflow numpy bleak pyxdf pyqtgraph PyQt5
 ```
 
 ---
@@ -166,16 +168,19 @@ La detection è ritardata di `POST_S = 0.40 s`: quando `beat=1.0` appare al camp
 1. **Local-max/min check** (±`LOCAL_WIN = 5` campioni, ~38 ms a 130 Hz)
    Il campione candidato deve essere il massimo assoluto (o il minimo, per ECG invertito) nella sua finestra locale ristretta — non della finestra intera PRE+POST (0.65 s), che a frequenze cardiache normali contiene due R-peak e renderebbe il confronto fuorviante.
 
-2. **Sharpness discriminator** (`SHARP_FRAC = 0.40`)
-   Il segnale deve variare di almeno il 40 % dell'ampiezza locale nei `LOCAL_WIN` campioni che precedono il candidato. I picchi R hanno un'upstroke di 20–40 ms → superano la soglia. Le onde T hanno un'upstroke di 80–150 ms → vengono rigettate.
+2. **Sharpness discriminator** (`SHARP_FRAC = 0.50`)
+   Il segnale deve variare di almeno il 50 % dell'ampiezza locale nei `LOCAL_WIN` campioni che precedono il candidato. I picchi R hanno un'upstroke di 20–40 ms → superano la soglia. Le onde T hanno un'upstroke di 80–150 ms → vengono rigettate.
 
-3. **Soglia adattiva sull'ampiezza** (`AMP_FRAC = 0.55`)
+3. **Max-derivative check** (`MAX_DERIV_WIN = 3`)
+   La derivata massima campione-per-campione in ±3 campioni attorno al candidato deve superare il 20% dell'ampiezza. I picchi R hanno derivate 5–10x più ripide delle onde T, rendendo questo il discriminatore più affidabile.
+
+4. **Soglia adattiva sull'ampiezza** (`AMP_FRAC = 0.55`)
    L'ampiezza del candidato deve raggiungere almeno il 55 % della media mobile esponenziale (EMA, α = 0.2) dei picchi accettati in precedenza. Prima dell'inizializzazione dell'EMA si usa la soglia fissa `MIN_AMP_UV = 60 µV` (calcolata sulla finestra locale di 38 ms, non sull'intera finestra).
 
-4. **Periodo refrattario** (`REFRACT_S = 0.35 s = 45 campioni`)
-   Dopo ogni R-peak confermato, la detection è disabilitata per 350 ms — impedisce doppie detezioni sul versante discendente o sull'onda S.
+5. **Periodo refrattario** (`REFRACT_S = 0.40 s = 52 campioni`)
+   Dopo ogni R-peak confermato, la detection è disabilitata per 400 ms — impedisce doppie detezioni sul versante discendente, sull'onda S o sulla T.
 
-5. **Guard MIN_RR in `_ingest`**
+6. **Guard MIN_RR in `_ingest`**
    Prima di confermare un picco, viene verificato che `peak_ts − last_peak_ts ≥ MIN_RR_S = 0.35 s`. Questo controllo copre anche il caso in cui `last_peak_ts` sia stato avanzato dalla *gap prediction* (vedi sotto), prevenendo doppie detezioni successive a una previsione.
 
 ### Gap prediction
@@ -227,10 +232,11 @@ I campioni imputati hanno ECG sintetico e `ax/ay/az = NaN` (nessun dato accelero
 | `PRE_S` / `POST_S` | 0.25 s / 0.40 s | Finestra attorno al picco |
 | `LOCAL_WIN` | 5 campioni (~38 ms) | Half-width per local-max check e sharpness |
 | `MIN_RR_S` / `MAX_RR_S` | 0.35 s / 1.60 s | Range fisiologico RR (170–37 bpm) |
-| `REFRACT_S` | 0.35 s | Periodo refrattario post-picco |
+| `REFRACT_S` | 0.40 s | Periodo refrattario post-picco |
 | `AMP_FRAC` | 0.55 | Soglia adattiva (55 % dell'EMA) |
 | `MIN_AMP_UV` | 60 µV | Soglia fissa per bootstrap dell'EMA |
-| `SHARP_FRAC` | 0.40 | Soglia sharpness (upstroke/ampiezza) |
+| `SHARP_FRAC` | 0.50 | Soglia sharpness (upstroke/ampiezza) |
+| `MAX_DERIV_WIN` | 3 campioni (~23 ms) | Half-width per max-derivative check |
 | `MAX_BEATS` | 8 | Beat nel template |
 | `IMPUTER_MAX_GAP_S` | 4.0 s | Gap oltre il quale non si imputa |
 
@@ -248,11 +254,12 @@ IMPUTER_MAX_GAP_S     = 4.0     # gap più lunghi non vengono imputati
 
 I segnali ECG (WiFi e Polar H10) e PPG (EmotiBit) vengono opzionalmente filtrati in Python prima dell'invio all'outlet LSL tramite una **media mobile pesata causale** (no dipendenze esterne, puro Python).
 
-### Kernel usato
+### Kernel usati
 
 ```
 ECG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]   # finestra triangolare simmetrica a 5 tap
 PPG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]   # stesso kernel
+ACC_FILTER_WEIGHTS = [1, 2, 3, 4, 3, 2, 1]  # 7 tap — più aggressivo per ACC a 50 Hz
 ```
 
 La finestra triangolare assegna peso massimo al campione corrente (3) e pesi decrescenti ai campioni precedenti (2, 1), ottenendo un'attenuazione delle alte frequenze senza annullare i picchi del segnale.
@@ -269,9 +276,9 @@ La finestra triangolare assegna peso massimo al campione corrente (3) e pesi dec
 
 ### Canali filtrati
 
-- **ECG WiFi** (`ArduinoWiFi_ECG`): canale `ecg` — tutti i campioni passano per il filtro.
-- **Polar H10** (`PolarH10_Sens`): solo il canale `ecg` (indice 0) — i canali `ax`, `ay`, `az` vengono trasmessi **senza filtro**.
-- **EmotiBit PPG** (`EmotiBit_PPG`): tutti e tre i canali `ppg_0`, `ppg_1`, `ppg_2`.
+- **ECG WiFi** (`ArduinoWiFi_ECG`): canale `ecg` — 5-tap triangolare.
+- **Polar H10** (`PolarH10_Sens`): canale `ecg` (5-tap) + canali `ax`, `ay`, `az` (7-tap, più aggressivo per compensare la bassa risoluzione dell'ACC a 50 Hz).
+- **EmotiBit PPG** (`EmotiBit_PPG`): tutti e tre i canali `ppg_0`, `ppg_1`, `ppg_2` — 5-tap.
 - **EmotiBit IMU / EDA / TEMP**: non filtrati.
 
 ### Attivazione / disattivazione
@@ -311,9 +318,9 @@ Qualunque lista di pesi positivi funziona — la classe `SignalFilter` normalizz
    ENABLE_ARDUINO_WIFI_ECG = False    # ECG analogico WiFi
    ENABLE_BLEAK_POLAR = True          # BLE diretto Polar H10 (raccomandato, ~0% loss)
    ENABLE_ARDUINO_USB_POLAR = False   # Arduino bridge Polar (legacy, ~20% loss)
-   ENABLE_EMOTIBIT = True             # EmotiBit
-   ENABLE_SIGNAL_FILTER = True        # Filtro media mobile pesata su ECG e PPG
-   ENABLE_ECG_IMPUTATION = True       # Imputazione gap BLE con ECG sintetico
+   ENABLE_EMOTIBIT = False            # EmotiBit (abilitare quando connesso)
+   ENABLE_SIGNAL_FILTER = True        # Filtro media mobile pesata su ECG, ACC e PPG
+   ENABLE_ECG_IMPUTATION = False      # Non necessario con BLE diretto (~0% loss)
    ```
 
 3. **Avviare lo script**:
@@ -321,13 +328,16 @@ Qualunque lista di pesi positivi funziona — la classe `SignalFilter` normalizz
    python BiHome_wearable.py
    ```
 
-4. **Registrare**: usare **LabRecorder** (o `pylsl`) per salvare tutti gli stream in formato `.xdf`.
-
-5. **Monitorare** (opzionale, terminale separato):
+4. **Monitorare e registrare** (terminale separato):
    ```bash
    python Viewer/lsl_viewer.py
    ```
-   Il viewer custom scopre automaticamente tutti gli stream LSL attivi e mostra un grafico per canale con toggle per stream, scala Y auto/manuale e salvataggio diagnostiche CSV in `Viewer/diag/`.
+   Il viewer scopre automaticamente tutti gli stream LSL attivi. Per registrare:
+   - Selezionare gli stream da includere con le checkbox **REC** nel pannello laterale
+   - Inserire un nome file (opzionale, default: data e ora)
+   - Cliccare **REC** per avviare, **STOP** per terminare
+   - Il file `.xdf` viene salvato in `Viewer/recordings/` tramite LabRecorderCLI
+   - Al termine, un CSV per stream viene esportato automaticamente nella stessa cartella
 
 ---
 
@@ -440,24 +450,27 @@ Per trovare l'indirizzo MAC della propria Polar H10, eseguire `python diag_bleak
 
 ## Viewer LSL custom (`Viewer/lsl_viewer.py`)
 
-Viewer basato su **pyqtgraph + PyQt5** che scopre automaticamente tutti gli stream LSL attivi e li visualizza in tempo reale.
+Viewer basato su **pyqtgraph + PyQt5** con UI brandizzata BiHome (font Montserrat, palette teal/dark).
 
 ### Funzionalità
 
 - **Auto-discovery** di tutti gli stream LSL disponibili
-- **Un grafico per canale**, raggruppati per stream
-- **Toggle per stream**: pulsante per abilitare/disabilitare tutti i canali di uno stream
-- **Scala Y**: auto-scale o range manuale per ogni canale
-- **Asse X condiviso** per stream (ogni stream segue i propri timestamp)
-- **Gap detection**: inserisce NaN quando il segnale si interrompe per >3× il periodo atteso, evitando linee orizzontali spurie
-- **Dedup mediana**: rimuove campioni duplicati/interpolati (artefatti dell'imputer) tramite filtro sulla distanza temporale
-- **Salvataggio CSV diagnostiche** in `Viewer/diag/` con timestamp, valori per canale e flag beat
+- **Un grafico per canale** con scrolling fluido (20 FPS, rivelazione graduale dei dati)
+- **Toggle canale**: bottoni colorati (colore saturo = attivo, grigio = spento)
+- **Drag & drop**: riordina i canali trascinandoli
+- **Scala Y**: auto-scale o range manuale per ogni canale (colonne allineate)
+- **BPM e HRV**: heart rate (media 30s), SDNN e RMSSD calcolati dal canale beat
+- **Beat markers**: pallini rossi posizionati sugli R-peak ECG via analisi derivata
+- **Registrazione XDF**: bottone REC/STOP integrato con LabRecorderCLI, export automatico CSV per stream
+- **Checkbox REC per stream**: include/escludi stream dalla registrazione
+- **Gap detection**: inserisce NaN per interrompere le linee orizzontali spurie
+- **Persistenza impostazioni**: salva/ripristina visibilità canali, scala Y, dimensioni finestra
 - **Buffer circolare numpy** per performance O(1) su append e snapshot
 
 ### Dipendenze
 
 ```bash
-pip install pylsl pyqtgraph PyQt5 numpy
+pip install pylsl pyqtgraph PyQt5 numpy pyxdf
 ```
 
 ### Avvio
