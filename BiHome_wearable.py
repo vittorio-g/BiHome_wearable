@@ -547,11 +547,6 @@ class PolarECGImputer:
         self._gap_start_ts: Optional[float] = None
         self._last_beat_output_ts: Optional[float] = None  # wall-clock guard for output
 
-        # Output delay queue: holds samples for POST_S seconds so beat markers
-        # can be retroactively placed on the exact R-peak sample.
-        from collections import deque
-        self._delay_q: 'deque[List]' = deque()  # each entry: [ts, val, is_beat]
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -559,105 +554,60 @@ class PolarECGImputer:
     def push(self, ts: float, val: float) -> List[Tuple[float, float, bool]]:
         """Feed one sample (ts in device-seconds, val in µV or NaN).
 
-        Returns a list of (ts, ecg_val, is_beat) triples.  Output is delayed by
-        POST_S (~0.4 s) so that beat markers land on the exact R-peak sample
-        rather than being offset by the detection latency.
+        Returns a list of (ts, ecg_val, is_beat) triples:
+          - Normal:    [(ts, val, is_beat)]      is_beat=True when R-peak confirmed
+          - Gap start: []                        NaN samples silently consumed
+          - Gap end:   [(imp_ts, imp_val, is_beat), ..., (ts, val, is_beat)]
 
-        Imputed samples (gap fill) are returned immediately with their own
-        predicted beat positions.
+        NOTE: R-peak detection is delayed by POST_S (~0.4 s) because it waits for
+        the post-peak window to complete before confirming.  When is_beat=True on
+        a real sample at time T, the actual peak occurred at approximately T-POST_S.
+        Imputed beats (from gap filling) are marked at their exact predicted position.
         """
         import math
-        out: List[Tuple[float, float, bool]] = []
-
         if math.isnan(val):
             if not self._in_gap:
                 self._in_gap       = True
                 self._gap_start_ts = ts
-            # Flush delay queue on gap start (no more samples coming to confirm)
-            while self._delay_q:
-                e = self._delay_q.popleft()
-                out.append(self._guard_beat(e[0], e[1], e[2]))
-            return out
+            return []
 
-        # Gap end → impute if enabled
+        imputed: List[Tuple[float, float, bool]] = []
         if self._in_gap and self._gap_start_ts is not None:
             gap_dur = ts - self._gap_start_ts
             if 0.0 < gap_dur <= self._max_gap:
                 imputed = self._fill(self._gap_start_ts, ts)
-                for imp in imputed:
-                    out.append(self._guard_beat(*imp))
             self._in_gap       = False
             self._gap_start_ts = None
 
-        # Run detection (updates _last_peak_ts if peak confirmed)
         prev_peak = self._last_peak_ts
         self._ingest(ts, val)
-        new_beat_ts = None
-        if self._last_peak_ts is not None and self._last_peak_ts != prev_peak:
-            new_beat_ts = self._last_peak_ts  # actual peak timestamp
+        is_beat = (self._last_peak_ts is not None and self._last_peak_ts != prev_peak)
 
-        # If a new beat was confirmed, retroactively mark the correct sample
-        # in the delay queue
-        if new_beat_ts is not None:
-            best_idx = -1
-            best_dt = float('inf')
-            for i, e in enumerate(self._delay_q):
-                dt = abs(e[0] - new_beat_ts)
-                if dt < best_dt:
-                    best_dt = dt
-                    best_idx = i
-            if best_idx >= 0:
-                self._delay_q[best_idx][2] = True
-
-        # Gap prediction: if no beat detected for > 1.8 × mean RR
-        if (new_beat_ts is None
+        # Gap prediction: if no beat detected for > 1.8 × mean RR, advance the
+        # expected beat position and mark this sample as a predicted beat.
+        if (not is_beat
                 and self._last_peak_ts is not None
                 and len(self._rr_hist) >= 2):
             rr = self._rr_estimate()
-            elapsed = ts - self._last_peak_ts
+            elapsed = (ts - self.POST_S) - self._last_peak_ts
             if elapsed > 1.8 * rr:
-                pred_ts = self._last_peak_ts + rr
-                self._last_peak_ts = pred_ts
-                # Mark predicted beat in delay queue if possible
-                best_idx = -1
-                best_dt = float('inf')
-                for i, e in enumerate(self._delay_q):
-                    dt = abs(e[0] - pred_ts)
-                    if dt < best_dt:
-                        best_dt = dt
-                        best_idx = i
-                if best_idx >= 0:
-                    self._delay_q[best_idx][2] = True
+                self._last_peak_ts = self._last_peak_ts + rr
+                is_beat = True
 
-        # Enqueue current sample (initially beat=False)
-        self._delay_q.append([ts, val, False])
-
-        # Release samples older than POST_S from the delay queue
-        cutoff = ts - self.POST_S
-        while self._delay_q and self._delay_q[0][0] <= cutoff:
-            e = self._delay_q.popleft()
-            out.append(self._guard_beat(e[0], e[1], e[2]))
-
-        return out
-
-    def flush(self) -> List[Tuple[float, float, bool]]:
-        """Flush remaining samples from the delay queue (call at end of stream)."""
-        out = []
-        while self._delay_q:
-            e = self._delay_q.popleft()
-            out.append(self._guard_beat(e[0], e[1], e[2]))
-        return out
-
-    def _guard_beat(self, ts: float, val: float, is_beat: bool) -> Tuple[float, float, bool]:
-        """Output guard: suppress beat if too close to previous."""
-        if is_beat:
-            if (self._last_beat_output_ts is None
-                    or ts - self._last_beat_output_ts >= self.MIN_RR_S):
-                self._last_beat_output_ts = ts
-                return (ts, val, True)
+        # Output guard: never emit two is_beat=True events within MIN_RR_S
+        results = imputed + [(ts, val, is_beat)]
+        filtered = []
+        for (evt_ts, evt_val, evt_beat) in results:
+            if evt_beat:
+                if (self._last_beat_output_ts is None
+                        or evt_ts - self._last_beat_output_ts >= self.MIN_RR_S):
+                    self._last_beat_output_ts = evt_ts
+                    filtered.append((evt_ts, evt_val, True))
+                else:
+                    filtered.append((evt_ts, evt_val, False))
             else:
-                return (ts, val, False)
-        return (ts, val, False)
+                filtered.append((evt_ts, evt_val, False))
+        return filtered
 
     def has_template(self) -> bool:
         return self._template is not None and len(self._rr_hist) >= 2
