@@ -291,6 +291,11 @@ class Viewer(QtWidgets.QMainWindow):
         self._cached_beats: Optional[Tuple[np.ndarray, np.ndarray]] = None  # (bt_x, bt_y) per ECG
         self._cached_beat_map: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
+        # Smooth draw cursor per stream: advances at real-time rate,
+        # revealing data gradually instead of in 560ms bursts
+        self._draw_cursor: Dict[str, float] = {}
+        self._last_refresh_ts: float = pylsl.local_clock()
+
         self._timer = QtCore.QTimer()
         self._timer.timeout.connect(self._refresh)
         self._timer.start(REFRESH_MS)
@@ -558,15 +563,24 @@ class Viewer(QtWidgets.QMainWindow):
         win = self.win_spin.value()
         t_ref = self._t_ref
 
-        # per-stream smooth scroll edge: use wall clock minus EMA delay
-        # so scrolling is driven by the smooth local clock, not by the
-        # bursty data arrival (~560ms Polar notification interval)
+        # Smooth draw cursor: advances at real-time rate between data bursts
+        dt_frame = now - self._last_refresh_ts
+        self._last_refresh_ts = now
+        dt_frame = min(dt_frame, 0.1)  # cap to avoid jumps after pause
+
         stream_tend: Dict[str, float] = {}
         parts = []
         for key, st in self.streams.items():
             if st.latest_ts > 0:
-                stream_tend[key] = now - st.delay  # smooth: advances with wall clock
-                parts.append(f"{st.name}: {st.delay * 1000:.0f}ms")
+                target = st.latest_ts
+                cursor = self._draw_cursor.get(key, target)
+                # Advance cursor at real-time rate
+                cursor += dt_frame
+                # Never exceed actual data we have
+                cursor = min(cursor, target)
+                self._draw_cursor[key] = cursor
+                stream_tend[key] = cursor
+                parts.append(f"{st.name}: {(now - target) * 1000:.0f}ms")
 
         # visibility change?
         cv = [r.cb.isChecked() for r in self.rows]
