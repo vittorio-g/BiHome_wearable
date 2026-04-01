@@ -294,6 +294,72 @@ class ChRow:
     row_widget: object = None     # the QWidget container for this row
 
 
+# ── draggable channel row ────────────────────────────────────────────────────
+
+class DraggableChannelRow(QtWidgets.QWidget):
+    """A channel row widget that supports drag & drop reordering."""
+
+    def __init__(self, viewer, parent=None):
+        super().__init__(parent)
+        self._viewer = viewer
+        self._ch_row = None  # set after construction
+        self.setAcceptDrops(True)
+        self._drag_start = None
+
+    def mousePressEvent(self, ev):
+        if ev.button() == QtCore.Qt.LeftButton:
+            self._drag_start = ev.pos()
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if (self._drag_start is not None
+                and (ev.pos() - self._drag_start).manhattanLength() > 10):
+            drag = QtGui.QDrag(self)
+            mime = QtCore.QMimeData()
+            # Store the row index
+            idx = self._viewer.rows.index(self._ch_row) if self._ch_row else -1
+            mime.setText(str(idx))
+            drag.setMimeData(mime)
+            # Semi-transparent snapshot as drag pixmap
+            pix = self.grab()
+            painter = QtGui.QPainter(pix)
+            painter.fillRect(pix.rect(), QtGui.QColor(0, 0, 0, 100))
+            painter.end()
+            drag.setPixmap(pix)
+            drag.setHotSpot(ev.pos())
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            drag.exec_(QtCore.Qt.MoveAction)
+            self.setCursor(QtCore.Qt.ArrowCursor)
+            self._drag_start = None
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        self._drag_start = None
+        super().mouseReleaseEvent(ev)
+
+    def dragEnterEvent(self, ev):
+        if ev.mimeData().hasText():
+            ev.acceptProposedAction()
+            self.setStyleSheet(f"border-top: 2px solid {ACCENT};")
+
+    def dragLeaveEvent(self, ev):
+        self.setStyleSheet("")
+
+    def dropEvent(self, ev):
+        self.setStyleSheet("")
+        src_idx = int(ev.mimeData().text())
+        if self._ch_row is None:
+            return
+        dst_idx = self._viewer.rows.index(self._ch_row)
+        if src_idx == dst_idx or src_idx < 0:
+            return
+        # Move the row in the list
+        row = self._viewer.rows.pop(src_idx)
+        self._viewer.rows.insert(dst_idx, row)
+        self._viewer._rebuild_channel_layout()
+        self._viewer._rebuild_plots()
+
+
 # ── main window ──────────────────────────────────────────────────────────────
 
 class Viewer(QtWidgets.QMainWindow):
@@ -640,8 +706,7 @@ class Viewer(QtWidgets.QMainWindow):
         # Column headers (inside scroll area, moves with content)
         hdr = QtWidgets.QWidget()
         hdr_l = QtWidgets.QHBoxLayout(hdr)
-        hdr_l.setContentsMargins(22, 4, 4, 0); hdr_l.setSpacing(4)
-        # Spacer for arrow column
+        hdr_l.setContentsMargins(24, 4, 4, 0); hdr_l.setSpacing(4)
         self._hdr_ch_lbl = QtWidgets.QLabel("channel")
         self._hdr_ch_lbl.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
         self._hdr_ch_lbl.setMinimumWidth(90)
@@ -650,48 +715,29 @@ class Viewer(QtWidgets.QMainWindow):
             hl2 = QtWidgets.QLabel(h)
             hl2.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
             hl2.setAlignment(QtCore.Qt.AlignCenter)
-            if h == "auto":
-                hl2.setFixedWidth(32)
-            else:
-                hl2.setMinimumWidth(56)
+            hl2.setFixedWidth(32 if h == "auto" else 56)
             hdr_l.addWidget(hl2)
         hdr_l.addStretch()
         self.ch_lay.addWidget(hdr)
 
-        # Channel rows — arrows + colored toggle button + aligned auto/min/max
+        # Channel rows — drag handle + colored toggle button + auto/min/max
         cbs: List[QtWidgets.QCheckBox] = []
         ch_btns: List[QtWidgets.QPushButton] = []
-        row_widgets: List[QtWidgets.QWidget] = []
-        first_row_idx = len(self.rows)  # index of first row in this stream
 
         for ci, cl in enumerate(st.ch_labels):
-            rw = QtWidgets.QWidget()
+            rw = DraggableChannelRow(viewer=self)
             rl = QtWidgets.QHBoxLayout(rw)
-            rl.setContentsMargins(0, 1, 4, 1); rl.setSpacing(2)
+            rl.setContentsMargins(0, 1, 4, 1); rl.setSpacing(4)
             color = COLORS[self._color_idx % len(COLORS)]; self._color_idx += 1
 
-            # Up/down arrows for reordering
-            arrow_style = f"""
-                QPushButton {{
-                    background: transparent; color: {GRAY};
-                    border: none; font-size: 9px; padding: 0;
-                    min-width: 10px; max-width: 10px;
-                }}
-                QPushButton:hover {{ color: {ACCENT}; }}
-            """
-            up_btn = QtWidgets.QPushButton("\u25b2")
-            up_btn.setStyleSheet(arrow_style)
-            up_btn.setFixedSize(10, 12)
-            dn_btn = QtWidgets.QPushButton("\u25bc")
-            dn_btn.setStyleSheet(arrow_style)
-            dn_btn.setFixedSize(10, 12)
-            arrow_w = QtWidgets.QWidget()
-            arrow_w.setFixedWidth(12)
-            al = QtWidgets.QVBoxLayout(arrow_w)
-            al.setContentsMargins(0, 0, 0, 0); al.setSpacing(0)
-            al.addWidget(up_btn)
-            al.addWidget(dn_btn)
-            rl.addWidget(arrow_w)
+            # Drag handle
+            grip = QtWidgets.QLabel("\u2630")  # ☰ hamburger
+            grip.setStyleSheet(f"""
+                color: {GRAY}; font-size: 12px;
+                padding: 0 4px; min-width: 16px;
+            """)
+            grip.setCursor(QtGui.QCursor(QtCore.Qt.OpenHandCursor))
+            rl.addWidget(grip)
 
             # Toggle button
             btn = QtWidgets.QPushButton(cl)
@@ -706,9 +752,7 @@ class Viewer(QtWidgets.QMainWindow):
                     padding: 4px 10px; font-size: 11px; font-weight: 600;
                     text-align: left;
                 }}
-                QPushButton:hover {{
-                    background: rgba({r},{g},{b},0.22);
-                }}
+                QPushButton:hover {{ background: rgba({r},{g},{b},0.22); }}
                 QPushButton:!checked {{
                     background: {BG_INPUT}; color: {GRAY};
                     border: 1px solid {BORDER};
@@ -728,19 +772,14 @@ class Viewer(QtWidgets.QMainWindow):
             ys = YScaleWidget()
             rl.addWidget(ys)
             self.ch_lay.addWidget(rw)
-            row_widgets.append(rw)
 
             row_idx = len(self.rows)
-            self.rows.append(ChRow(skey=key, ci=ci,
-                                   label=f"{st.name}/{cl}", cb=cb,
-                                   ys=ys, color=color, row_widget=rw))
+            cr = ChRow(skey=key, ci=ci, label=f"{st.name}/{cl}", cb=cb,
+                       ys=ys, color=color, row_widget=rw)
+            self.rows.append(cr)
+            rw._ch_row = cr  # back-reference for drag & drop
             cbs.append(cb)
 
-            # Connect arrows (capture row_idx by default arg)
-            up_btn.clicked.connect(lambda _, ri=row_idx: self._move_channel(ri, -1))
-            dn_btn.clicked.connect(lambda _, ri=row_idx: self._move_channel(ri, +1))
-
-        # Equalize button widths + sync header column width
         QtCore.QTimer.singleShot(0, lambda btns=ch_btns: self._equalize_btn_widths(btns))
 
     @staticmethod
@@ -751,18 +790,6 @@ class Viewer(QtWidgets.QMainWindow):
         max_w = max(max_w, 80)
         for b in btns:
             b.setFixedWidth(max_w)
-
-    def _move_channel(self, row_idx: int, direction: int):
-        """Move a channel row up (-1) or down (+1) and rebuild plots."""
-        target = row_idx + direction
-        if target < 0 or target >= len(self.rows):
-            return
-        # Swap in the rows list
-        self.rows[row_idx], self.rows[target] = self.rows[target], self.rows[row_idx]
-        # Rebuild the layout to reflect new order
-        # (keeping widgets, just reordering in the layout)
-        self._rebuild_channel_layout()
-        self._rebuild_plots()
 
     def _rebuild_channel_layout(self):
         """Reorder channel row widgets in the layout to match self.rows order."""
