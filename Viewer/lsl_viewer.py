@@ -281,6 +281,14 @@ class Viewer(QtWidgets.QMainWindow):
         self._resolver_lock = threading.Lock()
         self._start_resolver()
 
+        # Data recomputation interval (heavy work: snapshot, BPM, beat markers)
+        self._data_interval = 5          # recompute every N frames
+        self._frame_count = 0
+        # Cache: per-row (x, vs) and beat overlay
+        self._cached_data: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        self._cached_beats: Optional[Tuple[np.ndarray, np.ndarray]] = None  # (bt_x, bt_y) per ECG
+        self._cached_beat_map: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+
         self._timer = QtCore.QTimer()
         self._timer.timeout.connect(self._refresh)
         self._timer.start(REFRESH_MS)
@@ -554,93 +562,125 @@ class Viewer(QtWidgets.QMainWindow):
             if st.latest_ts > 0:
                 stream_tend[key] = st.latest_ts
                 parts.append(f"{st.name}: {st.delay * 1000:.0f}ms")
-        self.delay_lbl.setText(
-            "Delays: " + ("  |  ".join(parts) if parts else "--"))
 
         # visibility change?
         cv = [r.cb.isChecked() for r in self.rows]
         if cv != self._prev_vis:
+            self._cached_data.clear()
+            self._cached_beat_map.clear()
             self._rebuild_plots(); return
 
-        # Compute BPM/HRV (uses beat channel)
-        t_min_hr = now - 60.0  # look back 60s for HR computation
-        self._update_hr(t_min_hr)
-        if self._bpm > 0:
-            self.hr_lbl.setText(f"HR: {self._bpm:.0f} bpm")
-            self.hrv_lbl.setText(
-                f"SDNN: {self._hrv_sdnn:.1f} ms  |  RMSSD: {self._hrv_rmssd:.1f} ms")
-        else:
-            self.hr_lbl.setText("HR: --")
-            self.hrv_lbl.setText("")
+        self._frame_count += 1
+        recompute = (self._frame_count % self._data_interval == 0)
 
-        # Find beat channel for ECG overlay
-        bc = self._find_beat_channel()
-        beat_ts_arr = None
-        if bc is not None:
-            skey_beat, ci_beat = bc
-            t_end_beat = stream_tend.get(skey_beat, now)
-            beat_buf = self.streams[skey_beat].bufs[ci_beat]
-            bts, bvs = beat_buf.raw_snapshot(t_end_beat - win)
-            if len(bts) > 0:
-                beat_mask = bvs > 0.5
-                beat_ts_arr = bts[beat_mask]
+        # Heavy work only on recompute frames
+        if recompute:
+            self.delay_lbl.setText(
+                "Delays: " + ("  |  ".join(parts) if parts else "--"))
 
-        for cr in self.rows:
+            # BPM/HRV
+            t_min_hr = now - 60.0
+            self._update_hr(t_min_hr)
+            if self._bpm > 0:
+                self.hr_lbl.setText(f"HR: {self._bpm:.0f} bpm")
+                self.hrv_lbl.setText(
+                    f"SDNN: {self._hrv_sdnn:.1f} ms  |  RMSSD: {self._hrv_rmssd:.1f} ms")
+            else:
+                self.hr_lbl.setText("HR: --")
+                self.hrv_lbl.setText("")
+
+            # Beat timestamps for ECG overlay
+            bc = self._find_beat_channel()
+            beat_ts_arr = None
+            if bc is not None:
+                skey_beat, ci_beat = bc
+                t_end_beat = stream_tend.get(skey_beat, now)
+                beat_buf = self.streams[skey_beat].bufs[ci_beat]
+                bts, bvs = beat_buf.raw_snapshot(t_end_beat - win)
+                if len(bts) > 0:
+                    beat_ts_arr = bts[bvs > 0.5]
+
+            # Recompute data for all rows
+            for ri, cr in enumerate(self.rows):
+                if cr.curve is None or cr.plot is None:
+                    continue
+                t_end = stream_tend.get(cr.skey, now)
+                t_min = t_end - win
+                buf = self.streams[cr.skey].bufs[cr.ci]
+                ts, vs = buf.snapshot(t_min)
+
+                if len(ts) < 2 or np.all(np.isnan(vs)):
+                    self._cached_data[ri] = (np.empty(0), np.empty(0))
+                    self._cached_beat_map[ri] = (np.empty(0), np.empty(0))
+                    continue
+
+                # diagnostic CSV (once per stream)
+                if cr.skey not in self._diag_done and len(ts) > 50:
+                    self._dump_csv(cr.skey, t_min)
+
+                x = ts - t_ref
+                self._cached_data[ri] = (x, vs)
+
+                # Beat markers for ECG
+                if cr.beat_scatter is not None and beat_ts_arr is not None and len(beat_ts_arr) > 0:
+                    raw_ts, raw_vs = buf.raw_snapshot(t_min)
+                    if len(raw_ts) > 1:
+                        idxs = np.searchsorted(raw_ts, beat_ts_arr, side='left')
+                        idxs = np.clip(idxs, 0, len(raw_ts) - 1)
+                        self._cached_beat_map[ri] = (beat_ts_arr - t_ref, raw_vs[idxs])
+                    else:
+                        self._cached_beat_map[ri] = (np.empty(0), np.empty(0))
+
+        # Fast path: update plots from cached data + scroll
+        for ri, cr in enumerate(self.rows):
             if cr.curve is None or cr.plot is None:
                 continue
 
             t_end = stream_tend.get(cr.skey, now)
-            t_min = t_end - win
+            xl = t_end - t_ref - win
+            xr = t_end - t_ref
 
-            buf = self.streams[cr.skey].bufs[cr.ci]
-            ts, vs = buf.snapshot(t_min)
+            cached = self._cached_data.get(ri)
+            if cached is None:
+                continue
+            x, vs = cached
 
-            # all-NaN channel (e.g. ACC not running): show empty
-            if len(ts) < 2 or np.all(np.isnan(vs)):
+            if len(x) == 0:
                 cr.curve.setData([], [])
                 if cr.beat_scatter:
                     cr.beat_scatter.setData([], [])
                 continue
 
-            # diagnostic CSV (once per stream)
-            if cr.skey not in self._diag_done and len(ts) > 50:
-                self._dump_csv(cr.skey, t_min)
+            if recompute:
+                cr.curve.setData(x, vs)
 
-            x = ts - t_ref
-            xl = t_end - t_ref - win
-            xr = t_end - t_ref
-            cr.curve.setData(x, vs)
             cr.plot.setXRange(xl, xr, padding=0)
 
-            # Beat markers on ECG plot
-            if cr.beat_scatter is not None and beat_ts_arr is not None and len(beat_ts_arr) > 0:
-                # Find ECG values at beat timestamps by nearest-neighbor lookup
-                # Use the raw (no-NaN) version for matching
-                raw_ts, raw_vs = buf.raw_snapshot(t_min)
-                if len(raw_ts) > 1:
-                    idxs = np.searchsorted(raw_ts, beat_ts_arr, side='left')
-                    idxs = np.clip(idxs, 0, len(raw_ts) - 1)
-                    bt_x = beat_ts_arr - t_ref
-                    bt_y = raw_vs[idxs]
-                    # Filter to visible window
+            # Beat scatter
+            if cr.beat_scatter is not None:
+                bt = self._cached_beat_map.get(ri)
+                if bt is not None and len(bt[0]) > 0:
+                    bt_x, bt_y = bt
                     vis = (bt_x >= xl) & (bt_x <= xr)
-                    cr.beat_scatter.setData(bt_x[vis], bt_y[vis])
-                else:
+                    if recompute:
+                        cr.beat_scatter.setData(bt_x[vis], bt_y[vis])
+                elif recompute:
                     cr.beat_scatter.setData([], [])
 
-            # Y range (nanmin/nanmax skip the gap NaN markers)
-            if cr.ys.is_auto():
-                ymn = float(np.nanmin(vs))
-                ymx = float(np.nanmax(vs))
-                if np.isnan(ymn) or np.isnan(ymx):
-                    continue
-                mg = (ymx - ymn) * 0.08
-                if mg < 1e-6:
-                    mg = max(abs(ymx) * 0.1, 0.5)
-                cr.plot.setYRange(ymn - mg, ymx + mg, padding=0)
-            else:
-                a, b = cr.ys.manual()
-                cr.plot.setYRange(a, b, padding=0)
+            # Y range
+            if recompute:
+                if cr.ys.is_auto():
+                    ymn = float(np.nanmin(vs))
+                    ymx = float(np.nanmax(vs))
+                    if np.isnan(ymn) or np.isnan(ymx):
+                        continue
+                    mg = (ymx - ymn) * 0.08
+                    if mg < 1e-6:
+                        mg = max(abs(ymx) * 0.1, 0.5)
+                    cr.plot.setYRange(ymn - mg, ymx + mg, padding=0)
+                else:
+                    a, b = cr.ys.manual()
+                    cr.plot.setYRange(a, b, padding=0)
 
     # ── CSV diagnostic ───────────────────────────────────────────────────
 
