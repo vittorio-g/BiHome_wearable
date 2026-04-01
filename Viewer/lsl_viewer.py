@@ -828,9 +828,92 @@ class Viewer(QtWidgets.QMainWindow):
         fname = os.path.basename(self._rec_file)
         self.rec_btn.setText("  REC")
         self.rec_name.setEnabled(True)
-        self.rec_status.setText(f"Saved: {fname} ({elapsed:.0f}s)")
         self.rec_status.setStyleSheet("font-size: 11px; color: #44cc44;")
         print(f"[REC] Stopped. File: {self._rec_file} ({elapsed:.1f}s)")
+
+        # Export CSVs from XDF in background
+        xdf_path = self._rec_file
+        if os.path.isfile(xdf_path):
+            self.rec_status.setText(f"Saved: {fname} ({elapsed:.0f}s) — exporting CSV...")
+            threading.Thread(target=self._export_csv_from_xdf,
+                             args=(xdf_path,), daemon=True).start()
+        else:
+            self.rec_status.setText(f"Saved: {fname} ({elapsed:.0f}s)")
+
+    def _export_csv_from_xdf(self, xdf_path: str):
+        """Export one CSV per stream from an XDF file (runs in background thread)."""
+        try:
+            import pyxdf
+            streams, header = pyxdf.load_xdf(xdf_path)
+        except ImportError:
+            print("[REC] pyxdf not installed — skipping CSV export (pip install pyxdf)")
+            self._update_rec_status_safe("CSV skipped (pyxdf not installed)")
+            return
+        except Exception as e:
+            print(f"[REC] XDF load error: {e}")
+            self._update_rec_status_safe(f"CSV error: {e}")
+            return
+
+        csv_dir = os.path.splitext(xdf_path)[0]  # e.g. recordings/20260401_132000/
+        os.makedirs(csv_dir, exist_ok=True)
+
+        exported = []
+        for stream in streams:
+            info = stream['info']
+            name = info['name'][0] if isinstance(info['name'], list) else info['name']
+            safe_name = name.replace(" ", "_").replace("/", "_")
+
+            ts = stream['time_stamps']
+            data = stream['time_series']
+
+            if len(ts) == 0:
+                continue
+
+            # Get channel labels
+            ch_labels = []
+            try:
+                ch_node = info['desc'][0]['channels'][0]['channel']
+                if isinstance(ch_node, list):
+                    for ch in ch_node:
+                        ch_labels.append(ch['label'][0] if isinstance(ch['label'], list) else ch['label'])
+                else:
+                    ch_labels.append(ch_node['label'][0] if isinstance(ch_node['label'], list) else ch_node['label'])
+            except Exception:
+                nch = data.shape[1] if len(data.shape) > 1 else 1
+                ch_labels = [f"ch{i}" for i in range(nch)]
+
+            # Get sample rate for filename
+            try:
+                srate = float(info['nominal_srate'][0] if isinstance(info['nominal_srate'], list)
+                              else info['nominal_srate'])
+            except Exception:
+                srate = len(ts) / (ts[-1] - ts[0]) if len(ts) > 1 else 0
+            srate_str = f"{srate:.0f}Hz" if srate > 0 else "irr"
+            csv_path = os.path.join(csv_dir, f"{safe_name}_{srate_str}.csv")
+            try:
+                with open(csv_path, "w") as f:
+                    f.write("timestamp," + ",".join(ch_labels) + "\n")
+                    for i in range(len(ts)):
+                        row = [f"{ts[i]:.9f}"]
+                        if len(data.shape) > 1:
+                            row.extend(f"{data[i, c]}" for c in range(data.shape[1]))
+                        else:
+                            row.append(f"{data[i]}")
+                        f.write(",".join(row) + "\n")
+                exported.append(safe_name)
+                print(f"[REC] CSV exported: {csv_path} ({len(ts)} samples)")
+            except Exception as e:
+                print(f"[REC] CSV export error for {name}: {e}")
+
+        msg = f"XDF + {len(exported)} CSV exported"
+        self._update_rec_status_safe(msg)
+
+    def _update_rec_status_safe(self, msg: str):
+        """Thread-safe status update."""
+        QtCore.QMetaObject.invokeMethod(
+            self.rec_status, "setText",
+            QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(str, msg))
 
     # ── CSV diagnostic ───────────────────────────────────────────────────
 
