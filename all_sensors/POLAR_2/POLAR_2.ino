@@ -1,4 +1,5 @@
 #include <ArduinoBLE.h>
+#include <WiFiNINA.h>    // only to call WiFi.end() and free NINA resources for BLE
 
 // ==============================
 // CONFIG SAMPLE RATE
@@ -496,38 +497,47 @@ bool sendStartACC() {
 // ==============================
 // Dashboard output
 // ==============================
+static uint32_t outSeq = 0;   // sequence number per sample
+static char lineBuf[160];     // pre-allocated buffer for snprintf
+
 void emitDashboardRow(uint64_t t_tick) {
   bool hadEcg = ecgBuf.popUntil(t_tick, lastEcg_uV);
   accBuf.popUntil(t_tick, lastAx_mg, lastAy_mg, lastAz_mg);
 
-  // Niente campione ECG per questo tick → non emettiamo nulla
-  // (evita l'artefatto "fill" causato dal valore costante tenuto).
   if (!hadEcg) return;
 
   uint32_t w, us32;
   splitMicros64(t_tick, w, us32);
 
-  // Formato nome:valore — leggibile dal Serial Plotter e parseable per nome dal PC.
-  Serial.print("Sens:");
-  Serial.print("wrap:"); Serial.print(w);    Serial.print(",");
-  Serial.print("us32:"); Serial.print(us32); Serial.print(",");
+  // Build line in buffer — single Serial.write instead of 15 Serial.print calls.
+  // Avoid dtostrf (not available on all SAMD cores): use snprintf with %d and
+  // manual decimal formatting for the 2-decimal float fields.
+  int pos = snprintf(lineBuf, sizeof(lineBuf),
+    "Sens:seq:%lu,wrap:%lu,us32:%lu,ecg:",
+    (unsigned long)outSeq++, (unsigned long)w, (unsigned long)us32);
 
-  Serial.print("ecg:");
-  if (isnan(lastEcg_uV)) Serial.print("nan"); else Serial.print(lastEcg_uV, 2);
-  Serial.print(",");
+  // Helper lambda-style: append a float with 2 decimals (or "nan") to lineBuf
+  #define APPEND_FLOAT(val) do { \
+    if (isnan(val)) { memcpy(lineBuf+pos, "nan", 3); pos += 3; } \
+    else { long _iv = (long)((val) * 100.0f + ((val) >= 0 ? 0.5f : -0.5f)); \
+           bool _neg = _iv < 0; if (_neg) _iv = -_iv; \
+           if (_neg) lineBuf[pos++] = '-'; \
+           long _whole = _iv / 100; long _frac = _iv % 100; \
+           pos += snprintf(lineBuf+pos, 20, "%ld.%02ld", _whole, _frac); } \
+  } while(0)
 
-  Serial.print("ax:");
-  if (isnan(lastAx_mg)) Serial.print("nan"); else Serial.print(lastAx_mg, 2);
-  Serial.print(",");
+  APPEND_FLOAT(lastEcg_uV); lineBuf[pos++] = ',';
+  memcpy(lineBuf+pos, "ax:", 3); pos += 3;
+  APPEND_FLOAT(lastAx_mg); lineBuf[pos++] = ',';
+  memcpy(lineBuf+pos, "ay:", 3); pos += 3;
+  APPEND_FLOAT(lastAy_mg); lineBuf[pos++] = ',';
+  memcpy(lineBuf+pos, "az:", 3); pos += 3;
+  APPEND_FLOAT(lastAz_mg);
+  lineBuf[pos++] = '\n';
 
-  Serial.print("ay:");
-  if (isnan(lastAy_mg)) Serial.print("nan"); else Serial.print(lastAy_mg, 2);
-  Serial.print(",");
+  Serial.write(lineBuf, pos);
 
-  Serial.print("az:");
-  if (isnan(lastAz_mg)) Serial.print("nan"); else Serial.print(lastAz_mg, 2);
-
-  Serial.print("\n");
+  #undef APPEND_FLOAT
 }
 
 void resetDataState() {
@@ -565,6 +575,11 @@ void setup() {
   while (!Serial) {}
 
   Serial.println("HELLO:POLAR_H10_USB");
+
+  // Disable WiFi stack on NINA-W102 to free resources for BLE.
+  // The ESP32 coexistence mechanism can block BLE for hundreds of ms.
+  WiFi.end();
+  Serial.println("INFO:WIFI_DISABLED");
 
   if (!BLE.begin()) {
     Serial.println("ERR:BLE.begin_failed");
@@ -607,10 +622,10 @@ void loop() {
       delay(200);
       return;
     }
-    delay(150);  // pausa più lunga per dare tempo alla Polar di processare
+    delay(150);
   }
 
-  // avvia ACC subito dopo ECG (non aspettare haveEcgData)
+  // avvia ACC subito dopo ECG
   if (connected && ecgStartSent && !accStartSent) {
     delay(100);
     if (!sendStartACC()) {
@@ -620,8 +635,11 @@ void loop() {
     delay(150);
   }
 
-  // drena più notifiche PMD per loop
-  for (int i = 0; i < 16; i++) {
+  // ── Drain ALL pending BLE notifications ──
+  // Poll aggressively: up to 32 iterations per loop.
+  // This is critical — the NINA-W102 has a small notification queue
+  // and drops data if we don't drain fast enough.
+  for (int i = 0; i < 32; i++) {
     BLE.poll();
     if (!(pmdData && pmdData.valueUpdated())) break;
 
@@ -647,7 +665,6 @@ void loop() {
 
     if ((nowMs - ecgStartMs) > 1500 && !accStartSent) {
       Serial.println("WARN:NO_ECG_DATA_YET");
-      // piccolo retry ECG
       ecgStartSent = false;
       delay(100);
     }
@@ -658,16 +675,19 @@ void loop() {
     }
   }
 
-  // dashboard output: un campione per iterazione — niente burst.
-  // Il batch BLE viene spalmato su più loop() consecutivi invece di essere
-  // emesso tutto in una volta, dando al viewer una curva fluida.
+  // ── Emit ALL ready samples in burst ──
+  // Don't drip-feed one per loop — emit everything the ring buffer has ready.
+  // This keeps the loop tight for BLE polling between bursts.
   if (haveEcgData) {
     uint64_t now = readMicros64();
-    if ((int64_t)(now - nextOutUs64) >= 0) {
+    // Emit up to 16 samples per loop to avoid blocking BLE too long
+    for (int i = 0; i < 16 && (int64_t)(now - nextOutUs64) >= 0; i++) {
       emitDashboardRow(nextOutUs64);
       nextOutUs64 += (uint64_t)OUT_PERIOD_US;
     }
   }
 
-  delay(1);
+  // NO delay(1) — tight loop maximizes BLE.poll() frequency.
+  // yield() lets the scheduler run if needed (SAMD21).
+  yield();
 }

@@ -55,8 +55,8 @@ All_sensors/
 | Dispositivo | Ruolo | Connessione |
 |---|---|---|
 | **Arduino MKR WiFi 1010** | ECG analogico (elettrodi) | WiFi TCP → PC (IP `192.168.50.174:5000`) |
-| **Arduino MKR WiFi 1010** | Bridge BLE → USB per Polar H10 | USB Serial `COM5` @ 921600 baud |
-| **Polar H10** | ECG + accelerometro (BLE PMD) | BLE → Arduino bridge |
+| **Arduino MKR WiFi 1010** | Bridge BLE → USB per Polar H10 *(legacy)* | USB Serial `COM5` @ 921600 baud |
+| **Polar H10** | ECG + accelerometro (BLE PMD) | BLE diretto → PC (bleak) **oppure** BLE → Arduino bridge (legacy) |
 | **EmotiBit** | PPG, EDA, temperatura, IMU 9-axis | WiFi/UDP → BrainFlow → PC (auto-discovery via UDP broadcast) |
 | **DW3000 (UWB)** *(in pausa)* | Ranging 2-way per localizzazione | SPI su Arduino |
 
@@ -72,10 +72,12 @@ All_sensors/
 ## Flusso dati
 
 ```
-Polar H10 ──BLE──► Arduino MKR (POLAR_2.ino) ──USB Serial──►
-                                                              All_Sensors.py ──► LSL Outlets ──► LabRecorder / lsl_viewer
+Polar H10 ──BLE diretto──► PC (bleak) ──────────────────────►
+                                                              BiHome_wearable.py ──► LSL Outlets ──► LabRecorder / lsl_viewer
 Arduino MKR (ECG.ino) ──WiFi TCP──────────────────────────►
 EmotiBit ──WiFi/UDP──► BrainFlow ─────────────────────────►
+
+(Legacy) Polar H10 ──BLE──► Arduino MKR (POLAR_2.ino) ──USB Serial──► BiHome_wearable.py
 ```
 
 ---
@@ -139,7 +141,7 @@ Sul PC questi vengono ricostruiti da `(wrap, us32)` inviati via seriale/TCP.
 ## Dipendenze Python
 
 ```bash
-pip install pylsl pyserial brainflow numpy
+pip install pylsl pyserial brainflow numpy bleak
 ```
 
 Per il viewer custom:
@@ -306,11 +308,12 @@ Qualunque lista di pesi positivi funziona — la classe `SignalFilter` normalizz
 
 2. **Configurare i feature flags** in `BiHome_wearable.py`:
    ```python
-   ENABLE_ARDUINO_WIFI_ECG = True   # ECG analogico WiFi
-   ENABLE_ARDUINO_USB_POLAR = True  # Bridge Polar H10
-   ENABLE_EMOTIBIT = True           # EmotiBit
-   ENABLE_SIGNAL_FILTER = True      # Filtro media mobile pesata su ECG e PPG
-   ENABLE_ECG_IMPUTATION = True     # Imputazione gap BLE con ECG sintetico
+   ENABLE_ARDUINO_WIFI_ECG = False    # ECG analogico WiFi
+   ENABLE_BLEAK_POLAR = True          # BLE diretto Polar H10 (raccomandato, ~0% loss)
+   ENABLE_ARDUINO_USB_POLAR = False   # Arduino bridge Polar (legacy, ~20% loss)
+   ENABLE_EMOTIBIT = True             # EmotiBit
+   ENABLE_SIGNAL_FILTER = True        # Filtro media mobile pesata su ECG e PPG
+   ENABLE_ECG_IMPUTATION = True       # Imputazione gap BLE con ECG sintetico
    ```
 
 3. **Avviare lo script**:
@@ -393,14 +396,45 @@ La posizione 3D viene stimata per trilaterazione dalle 3 distanze misurate.
 
 ---
 
-## TODO CRITICO
+## Connessione BLE diretta Polar H10 (bleak)
 
-- **Migliorare la qualità del segnale ECG Polar H10**: il pipeline attuale (Polar H10 → BLE → Arduino NINA-W102 → Serial → Python → LSL) presenta una perdita di dati significativa che si manifesta come gap nel tracciato ECG. Le cause probabili includono:
-  - Perdita di notifiche BLE a livello del modulo NINA-W102 (buffer limitato, polling non sufficientemente frequente)
-  - Overflow del buffer seriale su Windows durante le operazioni di SYNC
-  - Latenza nel parsing Python quando il thread è occupato
+La modalita' predefinita (`ENABLE_BLEAK_POLAR = True`) collega il PC direttamente alla Polar H10 via Bluetooth, bypassando l'Arduino MKR bridge.
 
-  L'architettura producer-consumer introdotta in `BiHome_wearable.py` (thread dedicato alla lettura seriale + coda + worker) e il buffer seriale da 128 KB hanno migliorato la situazione ma non risolto completamente il problema. È necessario investigare ulteriormente, possibilmente con logging statistico (`STATS` ogni 10 s) per identificare il collo di bottiglia esatto.
+### Perche' non l'Arduino bridge?
+
+Il modulo NINA-W102 (ESP32) sull'Arduino MKR WiFi 1010 presenta **gap periodici di ~570 ms ogni ~2.8 s** nella ricezione delle notifiche BLE, causando una perdita di dati del ~20%. L'analisi diagnostica ha dimostrato che:
+- La perdita e' al 100% nel modulo NINA (zero perdita seriale: `seq_gaps = 0`)
+- I gap sono regolari e indipendenti dal carico Python
+- `WiFi.end()` non risolve il problema (non e' coesistenza WiFi/BLE)
+
+La connessione BLE diretta via `bleak` (Windows Bluetooth stack) raggiunge **~0% perdita di dati**.
+
+### Requisiti
+
+- Bluetooth abilitato sul PC
+- Polar H10 **NON** associata (paired) in Windows — il pairing riduce l'MTU a 23 causando disconnessioni
+- Arduino bridge Polar **scollegato** (non puo' competere per la connessione BLE)
+
+```bash
+pip install bleak
+```
+
+### Configurazione
+
+In `BiHome_wearable.py`:
+```python
+ENABLE_BLEAK_POLAR = True              # BLE diretto (raccomandato)
+ENABLE_ARDUINO_USB_POLAR = False       # Arduino bridge (legacy, ~20% loss)
+POLAR_BLE_ADDRESS = "24:AC:AC:04:96:A3"  # indirizzo MAC della Polar H10
+```
+
+Per trovare l'indirizzo MAC della propria Polar H10, eseguire `python diag_bleak.py` con la Polar accesa e indossata.
+
+### Note
+
+- Il bridge Arduino (`POLAR_2.ino`) rimane disponibile come fallback se il PC non ha Bluetooth
+- La reconnessione automatica gestisce eventuali disconnessioni BLE
+- I timestamp usano il clock del sensore Polar (ns) calibrato verso `pylsl.local_clock()` via EMA
 
 ---
 

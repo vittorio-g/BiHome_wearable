@@ -14,6 +14,8 @@ FIXES:
 
 import sys
 import time
+import struct
+import asyncio
 import socket
 import select
 import threading
@@ -27,7 +29,8 @@ from pylsl import StreamInfo, StreamOutlet, local_clock
 # =====================================================
 
 ENABLE_ARDUINO_WIFI_ECG = False
-ENABLE_ARDUINO_USB_POLAR = True
+ENABLE_ARDUINO_USB_POLAR = False   # Arduino NINA bridge (legacy, ~20% data loss)
+ENABLE_BLEAK_POLAR = True          # Direct PC BLE via bleak (~0% data loss)
 ENABLE_EMOTIBIT = False
 
 # Weighted moving average on ECG (WiFi + Polar) and EmotiBit PPG.
@@ -52,9 +55,12 @@ ARD_WIFI_DATA_LABEL = "ECG"
 ARD_WIFI_NCH = 1
 ARD_WIFI_SRATE = 250.0
 
-# --- Arduino MKR over USB/Serial (Polar BLE PMD) ---
+# --- Arduino MKR over USB/Serial (Polar BLE PMD) — legacy ---
 POLAR_SERIAL_PORT = "COM5"
 POLAR_SERIAL_BAUD = 921600
+
+# --- Direct BLE to Polar H10 via bleak (PC Bluetooth) ---
+POLAR_BLE_ADDRESS = "24:AC:AC:04:96:A3"
 
 POLAR_LABEL_MAP = {
     # 'beat' is the last channel: 0 normally, 1 when an R-peak is confirmed.
@@ -218,27 +224,27 @@ class SystemMonitorThread(threading.Thread):
                 # Messaggio una-tantum quando il dispositivo si connette
                 if state == "ACTIVE" and name not in _logged_active:
                     _logged_active.add(name)
-                    log("[SETUP]", f"✓ {name} collegato")
+                    log("[SETUP]", f"[OK] {name} collegato")
 
                 # Messaggio una-tantum in caso di errore irreversibile
                 err_msg = fatal_error or (detail if state == "ERROR" else None)
                 if err_msg and name not in _logged_error:
                     _logged_error.add(name)
-                    log("[SETUP]", f"✗ {name} errore: {err_msg}")
+                    log("[SETUP]", f"[ERR] {name} errore: {err_msg}")
 
                 # Thread morto inaspettatamente
                 if (d.thread is not None and not d.thread.is_alive()
                         and not stop_event.is_set()
                         and name not in _logged_error):
                     _logged_error.add(name)
-                    log("[SETUP]", f"✗ {name} thread terminato inaspettatamente")
+                    log("[SETUP]", f"[ERR] {name} thread terminato inaspettatamente")
 
             # Sblocca gli stream quando tutti i dispositivi abilitati sono connessi
             if not ready_event.is_set():
                 enabled = [d for d in self.devices if d.health.enabled]
                 if enabled and all(d.health.name in _logged_active for d in enabled):
                     ready_event.set()
-                    log("[SETUP]", "Tutti i dispositivi collegati — avvio degli stream LSL ▶")
+                    log("[SETUP]", "Tutti i dispositivi collegati -- avvio degli stream LSL")
 
             time.sleep(0.2)
 
@@ -911,7 +917,7 @@ def parse_wrapped_sample(value: str, n_ch: int) -> Optional[Tuple[float, List[fl
                 ordered.append((k.strip(), v.strip()))
             wrap = int(kv["wrap"])
             us32 = int(kv["us32"])
-            vals = [float(v) for k, v in ordered if k not in ("wrap", "us32")]
+            vals = [float(v) for k, v in ordered if k not in ("wrap", "us32", "seq")]
             if len(vals) != n_ch:
                 return None
             t_us64 = arduino_us64(wrap, us32)
@@ -1354,6 +1360,282 @@ class ArduinoUSBPolarThread(threading.Thread):
         log("[ArduinoUSBPolar]", "Thread stopped.")
 
 # =====================================================
+# Direct BLE Polar H10 thread (bleak — bypasses Arduino bridge)
+# =====================================================
+
+class BleakPolarThread(threading.Thread):
+    """Connects directly to Polar H10 via PC Bluetooth using bleak.
+    Replaces ArduinoUSBPolarThread — eliminates NINA-W102 data loss."""
+
+    PMD_CONTROL = "FB005C81-02E7-F387-1CAD-8ACD2D8DF0C8"
+    PMD_DATA    = "FB005C82-02E7-F387-1CAD-8ACD2D8DF0C8"
+    HR_MEAS     = "00002a37-0000-1000-8000-00805f9b34fb"
+
+    ENABLE_ECG = bytes([0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00])
+    ENABLE_ACC = bytes([0x02, 0x02, 0x00, 0x01, 0x32, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00])
+
+    ECG_RATE = 130
+    ACC_RATE = 50
+    ECG_PERIOD_S = 1.0 / ECG_RATE
+    ACC_PERIOD_S = 1.0 / ACC_RATE
+
+    def __init__(self, address: str, label_map: Dict[str, Tuple[str, List[str], float]], health: DeviceHealth):
+        super().__init__(daemon=True)
+        self.address = address
+        self.label_map = label_map
+        self.health = health
+
+        # LSL outlets — same as ArduinoUSBPolarThread
+        self.outlets: Dict[str, StreamOutlet] = {}
+        for lbl, (sname, ch_labels, srate) in self.label_map.items():
+            self.outlets[lbl] = make_lsl_outlet(
+                stream_name=sname,
+                stream_type="BIO",
+                channel_labels=ch_labels,
+                nominal_srate=float(srate),
+                source_id=f"polar_{lbl.lower()}",
+            )
+
+        # ECG filter + imputer — same as ArduinoUSBPolarThread
+        self._polar_ecg_filters: Dict[str, SignalFilter] = (
+            {lbl: SignalFilter(ECG_FILTER_WEIGHTS) for lbl in self.label_map}
+            if ENABLE_SIGNAL_FILTER else {}
+        )
+        _gap_s = float(IMPUTER_MAX_GAP_S) if ENABLE_ECG_IMPUTATION else 0.0
+        self._ecg_imputers: Dict[str, PolarECGImputer] = {
+            lbl: PolarECGImputer(max_gap_s=_gap_s) for lbl in self.label_map
+        }
+
+        # Clock calibration: Polar sensor ns → local_clock() offset (EMA)
+        self._polar_off_init = False
+        self._polar_off_s = 0.0  # offset such that ts_host = ts_polar_s + offset
+        self._ALPHA = 0.05  # slower EMA — Polar clock is very stable
+
+        # ACC state: hold last known values
+        self._last_acc = [float('nan'), float('nan'), float('nan')]
+
+        # Stats
+        self._ecg_count = 0
+        self._acc_count = 0
+        self._notif_count = 0
+        self._printed_first = {lbl: False for lbl in self.label_map}
+
+    def _update_clock(self, polar_ts_ns: int):
+        """Calibrate Polar sensor clock (ns since boot) → pylsl.local_clock()."""
+        polar_s = polar_ts_ns / 1e9
+        host_now = float(local_clock())
+        sample = host_now - polar_s
+        if not self._polar_off_init:
+            self._polar_off_s = sample
+            self._polar_off_init = True
+        else:
+            self._polar_off_s = (1 - self._ALPHA) * self._polar_off_s + self._ALPHA * sample
+
+    def _polar_to_host(self, polar_ts_ns: int) -> float:
+        """Convert Polar sensor timestamp (ns) to host LSL time."""
+        return polar_ts_ns / 1e9 + self._polar_off_s
+
+    def _push_ecg_batch(self, payload: bytes, polar_ts_ns: int):
+        """Decode ECG samples from PMD payload and push to LSL."""
+        step = 3  # 24-bit signed per sample
+        nsamp = len(payload) // step
+        if nsamp <= 0:
+            return
+
+        self._update_clock(polar_ts_ns)
+
+        # polar_ts_ns is timestamp of LAST sample in batch
+        first_ns = polar_ts_ns - (nsamp - 1) * int(1e9 / self.ECG_RATE)
+
+        lbl = "Sens"
+        imputer = self._ecg_imputers.get(lbl)
+        filt = self._polar_ecg_filters.get(lbl)
+        outlet = self.outlets.get(lbl)
+        if not outlet:
+            return
+
+        for i in range(nsamp):
+            # Decode 24-bit signed little-endian
+            raw = payload[i*3 : i*3 + 3]
+            val = int.from_bytes(raw, byteorder='little', signed=False)
+            if val & 0x800000:
+                val |= ~0xFFFFFF  # sign extend
+            ecg_uv = float(val)
+
+            ts_ns = first_ns + i * int(1e9 / self.ECG_RATE)
+            ts_host = self._polar_to_host(ts_ns)
+
+            # Feed imputer (same as ArduinoUSBPolarThread._push_label)
+            if imputer:
+                raw_out = imputer.push(ts_host, ecg_uv)
+                for j, (imp_ts, imp_ecg, is_beat) in enumerate(raw_out):
+                    beat_val = 1.0 if is_beat else 0.0
+                    is_real = (j == len(raw_out) - 1)
+                    if is_real:
+                        vals = [imp_ecg] + list(self._last_acc) + [beat_val]
+                    else:
+                        vals = [imp_ecg, float('nan'), float('nan'), float('nan'), beat_val]
+
+                    if filt:
+                        vals = [filt.apply(vals[0])] + vals[1:]
+
+                    try:
+                        outlet.push_sample([float(v) for v in vals], timestamp=float(imp_ts))
+                    except Exception as e:
+                        log("[BleakPolar]", f"LSL push error: {e}")
+            else:
+                vals = [ecg_uv] + list(self._last_acc) + [0.0]
+                if filt:
+                    vals = [filt.apply(vals[0])] + vals[1:]
+                try:
+                    outlet.push_sample([float(v) for v in vals], timestamp=float(ts_host))
+                except Exception as e:
+                    log("[BleakPolar]", f"LSL push error: {e}")
+
+            self._ecg_count += 1
+
+        # Health + first-sample logging
+        now = float(local_clock())
+        self.health.set(last_data_at=now, first_data=True, detail="streaming")
+        if not self._printed_first.get(lbl, False):
+            sname = self.label_map.get(lbl, ("?",))[0]
+            log("[BleakPolar]", f"First ECG data -> LSL '{sname}' ({nsamp} samples)")
+            self._printed_first[lbl] = True
+
+    def _push_acc_batch(self, payload: bytes, polar_ts_ns: int):
+        """Decode ACC samples and update last-known ACC values."""
+        step = 6  # 3 × int16
+        nsamp = len(payload) // step
+        if nsamp <= 0:
+            return
+        # Keep only last sample (ACC is merged with ECG in output)
+        last = payload[(nsamp-1)*step : nsamp*step]
+        ax = int.from_bytes(last[0:2], 'little', signed=True)
+        ay = int.from_bytes(last[2:4], 'little', signed=True)
+        az = int.from_bytes(last[4:6], 'little', signed=True)
+        self._last_acc = [float(ax), float(ay), float(az)]
+        self._acc_count += nsamp
+
+    def _handle_pmd(self, sender, data: bytearray):
+        """BLE notification callback for PMD data characteristic."""
+        if len(data) < 10:
+            return
+        self._notif_count += 1
+        meas_type = data[0]
+        # Bytes 1-8: Polar sensor timestamp (ns, little-endian)
+        polar_ts_ns = struct.unpack_from('<Q', data, 1)[0]
+        # Byte 9: frame type (for ACC delta encoding detection)
+        frame_type = data[9] if len(data) > 9 else 0
+        payload = data[10:]
+
+        if meas_type == 0x00:  # ECG
+            self._push_ecg_batch(bytes(payload), polar_ts_ns)
+        elif meas_type == 0x02:  # ACC
+            # Only raw ACC (not delta) for simplicity
+            if not (frame_type & 0x80):
+                self._push_acc_batch(bytes(payload), polar_ts_ns)
+
+    async def _run_async(self):
+        """Main async loop: connect, subscribe, stream, auto-reconnect."""
+        from bleak import BleakClient, BleakScanner
+
+        while not stop_event.is_set():
+            self.health.set(state="CONNECTING", detail=f"scanning for {self.address}")
+            log("[BleakPolar]", f"Connecting to Polar H10 at {self.address}...")
+
+            try:
+                async with BleakClient(self.address) as client:
+                    mtu = getattr(client, 'mtu_size', '?')
+                    log("[BleakPolar]", f"Connected! MTU={mtu}")
+                    self.health.set(state="ACTIVE", connected_at=float(local_clock()), detail="connected")
+
+                    # Subscribe HR (keepalive) + PMD control (indications) + PMD data
+                    try:
+                        await client.start_notify(self.HR_MEAS, lambda s, d: None)
+                    except Exception:
+                        pass
+                    try:
+                        await client.start_notify(self.PMD_CONTROL, lambda s, d: None)
+                    except Exception:
+                        pass
+                    await client.start_notify(self.PMD_DATA, self._handle_pmd)
+
+                    await asyncio.sleep(1.0)
+
+                    # Start ECG
+                    await client.write_gatt_char(self.PMD_CONTROL, self.ENABLE_ECG, response=True)
+                    log("[BleakPolar]", "ECG stream started (130 Hz)")
+
+                    # Wait for first ECG data before starting ACC
+                    ecg_before = self._ecg_count
+                    for _ in range(50):  # up to 5s
+                        await asyncio.sleep(0.1)
+                        if self._ecg_count > ecg_before or not client.is_connected:
+                            break
+
+                    if not client.is_connected:
+                        continue  # reconnect
+
+                    await asyncio.sleep(1.0)
+
+                    # Start ACC
+                    try:
+                        await client.write_gatt_char(self.PMD_CONTROL, self.ENABLE_ACC, response=True)
+                        log("[BleakPolar]", "ACC stream started (50 Hz)")
+                    except Exception as e:
+                        log("[BleakPolar]", f"ACC start failed (non-critical): {e}")
+
+                    # Stay connected — poll until disconnect or stop
+                    last_stats = time.time()
+                    while not stop_event.is_set() and client.is_connected:
+                        await asyncio.sleep(0.1)
+                        # Stats every 10s
+                        now = time.time()
+                        if (now - last_stats) >= 10.0:
+                            elapsed = now - last_stats
+                            expected = int(self.ECG_RATE * elapsed)
+                            log("[BleakPolar]",
+                                f"STATS: ecg={self._ecg_count}, acc={self._acc_count}, "
+                                f"notif={self._notif_count}, expected~{expected}")
+                            self._ecg_count = 0
+                            self._acc_count = 0
+                            self._notif_count = 0
+                            last_stats = now
+
+                    if not client.is_connected:
+                        log("[BleakPolar]", "Disconnected from Polar H10")
+
+            except Exception as e:
+                log("[BleakPolar]", f"BLE error: {e}")
+
+            if stop_event.is_set():
+                break
+
+            self.health.set(state="CONNECTING", detail="reconnecting in 2s...")
+            log("[BleakPolar]", "Reconnecting in 2s...")
+            for _ in range(20):  # 2s in 0.1s increments
+                if stop_event.is_set():
+                    break
+                time.sleep(0.1)
+
+        self.health.set(state="STOPPED", detail="stopped")
+        log("[BleakPolar]", "Thread stopped.")
+
+    def run(self):
+        if not ENABLE_BLEAK_POLAR:
+            return
+        # Run async event loop in this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._run_async())
+        except Exception as e:
+            log("[BleakPolar]", f"Fatal error: {e}")
+        finally:
+            loop.close()
+
+
+# =====================================================
 # EmotiBit thread (unchanged timing logic)
 # =====================================================
 
@@ -1654,10 +1936,12 @@ def main():
 
     health_wifi = DeviceHealth(name="ArduinoWiFi(ECG)", enabled=ENABLE_ARDUINO_WIFI_ECG)
     health_polar = DeviceHealth(name="ArduinoUSB(Polar)", enabled=ENABLE_ARDUINO_USB_POLAR)
+    health_bleak_polar = DeviceHealth(name="BleakPolar(H10)", enabled=ENABLE_BLEAK_POLAR)
     health_emo = DeviceHealth(name="EmotiBit", enabled=ENABLE_EMOTIBIT)
 
     wifi_thread: Optional[ArduinoWiFiECGThread] = None
     polar_thread: Optional[ArduinoUSBPolarThread] = None
+    bleak_polar_thread: Optional[BleakPolarThread] = None
     emo_thread: Optional[EmotiBitThread] = None
 
     if ENABLE_ARDUINO_WIFI_ECG:
@@ -1683,6 +1967,16 @@ def main():
         threads.append(polar_thread)
         devices.append("ArduinoUSB(Polar)")
 
+    if ENABLE_BLEAK_POLAR:
+        bleak_polar_thread = BleakPolarThread(
+            address=POLAR_BLE_ADDRESS,
+            label_map=POLAR_LABEL_MAP,
+            health=health_bleak_polar,
+        )
+        bleak_polar_thread.start()
+        threads.append(bleak_polar_thread)
+        devices.append("BleakPolar(H10)")
+
     if ENABLE_EMOTIBIT:
         emo_thread = EmotiBitThread(health=health_emo)
         emo_thread.start()
@@ -1692,6 +1986,7 @@ def main():
     monitor_devices: List[MonitoredDevice] = [
         MonitoredDevice(health=health_wifi,  thread=wifi_thread),
         MonitoredDevice(health=health_polar, thread=polar_thread),
+        MonitoredDevice(health=health_bleak_polar, thread=bleak_polar_thread),
         MonitoredDevice(health=health_emo,   thread=emo_thread),
     ]
 
@@ -1709,6 +2004,9 @@ def main():
         for lbl, (sname, _, _) in POLAR_LABEL_MAP.items():
             print(f" - {sname} (internal label={lbl})", flush=True)
         print(" - Clock_ArduinoUSB_Polar", flush=True)
+    if ENABLE_BLEAK_POLAR:
+        for lbl, (sname, _, _) in POLAR_LABEL_MAP.items():
+            print(f" - {sname} (BLE direct, label={lbl})", flush=True)
     if ENABLE_EMOTIBIT:
         print(" - EmotiBit_IMU", flush=True)
         print(" - EmotiBit_PPG", flush=True)

@@ -1,5 +1,0 @@
-In terminale in qualsiasi punto, attivare l'evironment giusto con conda, vedere gli stream e poi plottarli. 
-
-conda activate streamviewer310
-lsl_status
-lsl_viewer
