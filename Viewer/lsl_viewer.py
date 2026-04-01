@@ -608,17 +608,6 @@ class Viewer(QtWidgets.QMainWindow):
                 self.hr_lbl.setText("HR: --")
                 self.hrv_lbl.setText("")
 
-            # Beat timestamps for ECG overlay
-            bc = self._find_beat_channel()
-            beat_ts_arr = None
-            if bc is not None:
-                skey_beat, ci_beat = bc
-                t_end_beat = stream_tend.get(skey_beat, now)
-                beat_buf = self.streams[skey_beat].bufs[ci_beat]
-                bts, bvs = beat_buf.raw_snapshot(t_end_beat - win)
-                if len(bts) > 0:
-                    beat_ts_arr = bts[bvs > 0.5]
-
             # Recompute data for all rows
             for ri, cr in enumerate(self.rows):
                 if cr.curve is None or cr.plot is None:
@@ -639,15 +628,26 @@ class Viewer(QtWidgets.QMainWindow):
 
                 self._cached_data[ri] = (ts, vs)  # store absolute timestamps
 
-                # Beat markers for ECG
-                if cr.beat_scatter is not None and beat_ts_arr is not None and len(beat_ts_arr) > 0:
-                    raw_ts, raw_vs = buf.raw_snapshot(t_min)
-                    if len(raw_ts) > 1:
-                        idxs = np.searchsorted(raw_ts, beat_ts_arr, side='left')
-                        idxs = np.clip(idxs, 0, len(raw_ts) - 1)
-                        self._cached_beat_map[ri] = (beat_ts_arr - t_ref, raw_vs[idxs])
-                    else:
-                        self._cached_beat_map[ri] = (np.empty(0), np.empty(0))
+                # Beat markers for ECG: use beat channel from same stream,
+                # both buffers have identical timestamps (same push_sample)
+                if cr.beat_scatter is not None:
+                    bc = self._find_beat_channel()
+                    if bc is not None:
+                        skey_beat, ci_beat = bc
+                        if skey_beat == cr.skey:
+                            ecg_buf = self.streams[skey_beat].bufs[cr.ci]
+                            beat_buf = self.streams[skey_beat].bufs[ci_beat]
+                            e_ts, e_vs = ecg_buf.raw_snapshot(t_min)
+                            b_ts, b_vs = beat_buf.raw_snapshot(t_min)
+                            # Both have same length and timestamps (pushed together)
+                            n = min(len(e_ts), len(b_ts))
+                            if n > 0:
+                                mask = b_vs[:n] > 0.5
+                                self._cached_beat_map[ri] = (
+                                    e_ts[:n][mask] - t_ref,
+                                    e_vs[:n][mask])
+                            else:
+                                self._cached_beat_map[ri] = (np.empty(0), np.empty(0))
 
         # Fast path: clip cached data to smoothly advancing t_end, update plots
         for ri, cr in enumerate(self.rows):
