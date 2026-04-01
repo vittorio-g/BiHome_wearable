@@ -442,6 +442,7 @@ def make_lsl_outlet(
 # Change these lists to tune the filter (any length, any positive weights).
 ECG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]
 PPG_FILTER_WEIGHTS = [1, 2, 3, 2, 1]
+ACC_FILTER_WEIGHTS = [1, 2, 3, 4, 3, 2, 1]  # 7-tap triangular — smooths 50Hz ACC
 
 class SignalFilter:
     """Causal weighted moving average, pure Python, no dependencies.
@@ -1406,6 +1407,12 @@ class BleakPolarThread(threading.Thread):
             {lbl: SignalFilter(ECG_FILTER_WEIGHTS) for lbl in self.label_map}
             if ENABLE_SIGNAL_FILTER else {}
         )
+        # ACC filters: one per axis (ax, ay, az) per label
+        self._acc_filters: Dict[str, List[SignalFilter]] = (
+            {lbl: [SignalFilter(ACC_FILTER_WEIGHTS) for _ in range(3)]
+             for lbl in self.label_map}
+            if ENABLE_SIGNAL_FILTER else {}
+        )
         _gap_s = float(IMPUTER_MAX_GAP_S) if ENABLE_ECG_IMPUTATION else 0.0
         self._ecg_imputers: Dict[str, PolarECGImputer] = {
             lbl: PolarECGImputer(max_gap_s=_gap_s) for lbl in self.label_map
@@ -1457,6 +1464,7 @@ class BleakPolarThread(threading.Thread):
         lbl = "Sens"
         imputer = self._ecg_imputers.get(lbl)
         filt = self._polar_ecg_filters.get(lbl)
+        acc_filt = self._acc_filters.get(lbl)  # list of 3 filters (ax, ay, az)
         outlet = self.outlets.get(lbl)
         if not outlet:
             return
@@ -1480,6 +1488,8 @@ class BleakPolarThread(threading.Thread):
                     is_real = (j == len(raw_out) - 1)
                     if is_real:
                         acc = self._interp_acc(imp_ts)
+                        if acc_filt:
+                            acc = [acc_filt[k].apply(acc[k]) for k in range(3)]
                         vals = [imp_ecg] + acc + [beat_val]
                     else:
                         vals = [imp_ecg, float('nan'), float('nan'), float('nan'), beat_val]
@@ -1493,6 +1503,8 @@ class BleakPolarThread(threading.Thread):
                         log("[BleakPolar]", f"LSL push error: {e}")
             else:
                 acc = self._interp_acc(ts_host)
+                if acc_filt:
+                    acc = [acc_filt[k].apply(acc[k]) for k in range(3)]
                 vals = [ecg_uv] + acc + [0.0]
                 if filt:
                     vals = [filt.apply(vals[0])] + vals[1:]
