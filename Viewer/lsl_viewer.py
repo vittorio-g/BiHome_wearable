@@ -22,6 +22,20 @@ import pyqtgraph as pg
 
 pg.setConfigOptions(antialias=False)
 
+# ── theme ────────────────────────────────────────────────────────────────────
+ACCENT      = "#05abc4"     # BiHome teal
+ACCENT_DIM  = "#048a9e"     # darker teal for hover/pressed
+GRAY        = "#657179"     # secondary text
+BG_DARK     = "#0f1318"     # main background
+BG_PANEL    = "#171d24"     # sidebar panel
+BG_CARD     = "#1e252e"     # card/section background
+BG_INPUT    = "#252d38"     # input fields
+BORDER      = "#2a3340"     # subtle borders
+TEXT_PRIMARY = "#e8ecf0"    # primary text
+TEXT_DIM     = "#8a939c"    # dimmed text
+RED_REC     = "#e83a3a"     # recording red
+GREEN_OK    = "#3acc6c"     # success green
+
 # ── constants ────────────────────────────────────────────────────────────────
 MAX_BUF = 50_000          # ~6 min @ 130 Hz
 WIN_S = 10.0
@@ -35,14 +49,15 @@ BEAT_SHIFT_S = 0.40       # beat detection delay (POST_S) — shift beat channel
 
 # LabRecorder paths (relative to this file's directory)
 _HERE = os.path.dirname(os.path.abspath(__file__))
+_FONT_DIR = os.path.join(_HERE, "fonts")
 _REC_DIR = os.path.join(os.path.dirname(_HERE), "LabRecorder")
 LABRECORDER_CLI = os.path.join(_REC_DIR, "LabRecorderCLI.exe")
 RECORDINGS_DIR = os.path.join(_HERE, "recordings")
 SETTINGS_FILE = os.path.join(_HERE, "viewer_settings.json")
 COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-    "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+    "#05abc4", "#ff7f0e", "#3acc6c", "#e83a3a", "#9467bd",
+    "#f0c040", "#e377c2", "#8a939c", "#bcbd22", "#17becf",
+    "#6ec8d8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
 ]
 
 
@@ -217,21 +232,37 @@ class Reader(threading.Thread):
 class YScaleWidget(QtWidgets.QWidget):
     changed = QtCore.pyqtSignal()
 
+    _SPIN_STYLE = f"""
+        QDoubleSpinBox {{
+            background: {BG_INPUT}; color: {TEXT_DIM};
+            border: 1px solid {BORDER}; border-radius: 3px;
+            padding: 1px 4px; font-size: 10px; max-width: 70px;
+        }}
+        QDoubleSpinBox:disabled {{ color: {BORDER}; }}
+        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+            background: {BG_CARD}; border: none; width: 12px;
+        }}
+    """
+
     def __init__(self):
         super().__init__()
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(4)
-        self.auto_cb = QtWidgets.QCheckBox("Auto Y")
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(3)
+        self.auto_cb = QtWidgets.QCheckBox("A")
+        self.auto_cb.setToolTip("Auto Y-scale")
         self.auto_cb.setChecked(True)
+        self.auto_cb.setStyleSheet(f"QCheckBox {{ color: {TEXT_DIM}; font-size: 10px; }}")
         self.auto_cb.toggled.connect(self._toggle)
         lay.addWidget(self.auto_cb)
         self.mn = QtWidgets.QDoubleSpinBox(); self.mn.setRange(-1e9, 1e9)
         self.mn.setDecimals(1); self.mn.setPrefix("min "); self.mn.setValue(-1)
         self.mn.setEnabled(False); self.mn.valueChanged.connect(self.changed)
+        self.mn.setStyleSheet(self._SPIN_STYLE)
         lay.addWidget(self.mn)
         self.mx = QtWidgets.QDoubleSpinBox(); self.mx.setRange(-1e9, 1e9)
         self.mx.setDecimals(1); self.mx.setPrefix("max "); self.mx.setValue(1)
         self.mx.setEnabled(False); self.mx.valueChanged.connect(self.changed)
+        self.mx.setStyleSheet(self._SPIN_STYLE)
         lay.addWidget(self.mx)
 
     def _toggle(self, on):
@@ -317,43 +348,102 @@ class Viewer(QtWidgets.QMainWindow):
 
     def _build_ui(self):
         sp = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        sp.setHandleWidth(1)
         self.setCentralWidget(sp)
 
         side = QtWidgets.QWidget()
-        sl = QtWidgets.QVBoxLayout(side); sl.setContentsMargins(4, 4, 4, 4)
+        side.setObjectName("sidebar")
+        side.setStyleSheet(f"#sidebar {{ background: {BG_PANEL}; }}")
+        sl = QtWidgets.QVBoxLayout(side)
+        sl.setContentsMargins(16, 16, 16, 12)
+        sl.setSpacing(8)
 
-        tw = QtWidgets.QHBoxLayout()
-        tw.addWidget(QtWidgets.QLabel("Window (s):"))
+        # ── Logo / Title ──
+        logo = QtWidgets.QLabel("BiHome")
+        logo.setStyleSheet(f"""
+            font-family: 'Montserrat Black', 'Montserrat', sans-serif;
+            font-size: 28px; font-weight: 900;
+            color: {ACCENT}; letter-spacing: 1px;
+            padding-bottom: 2px;
+        """)
+        sl.addWidget(logo)
+        sub = QtWidgets.QLabel("LSL Stream Viewer")
+        sub.setStyleSheet(f"font-size: 11px; color: {GRAY}; padding-bottom: 6px;")
+        sl.addWidget(sub)
+        sl.addWidget(self._sep())
+
+        # ── Controls row ──
+        ctrl = QtWidgets.QHBoxLayout(); ctrl.setSpacing(6)
+        self.pause_btn = QtWidgets.QPushButton("Pause")
+        self.pause_btn.setCheckable(True)
+        self._style_btn(self.pause_btn)
+        ctrl.addWidget(self.pause_btn)
+
+        ref_btn = QtWidgets.QPushButton("Refresh")
+        self._style_btn(ref_btn)
+        ref_btn.clicked.connect(self._start_resolver)
+        ctrl.addWidget(ref_btn)
+        sl.addLayout(ctrl)
+
+        # Window spinner
+        tw = QtWidgets.QHBoxLayout(); tw.setSpacing(6)
+        wl = QtWidgets.QLabel("Window")
+        wl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
+        tw.addWidget(wl)
         self.win_spin = QtWidgets.QDoubleSpinBox()
         self.win_spin.setRange(1, 600); self.win_spin.setDecimals(1)
         self.win_spin.setValue(WIN_S); self.win_spin.setSingleStep(1)
+        self.win_spin.setSuffix(" s")
+        self.win_spin.setStyleSheet(f"""
+            QDoubleSpinBox {{
+                background: {BG_INPUT}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 3px 6px; font-size: 12px;
+            }}
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+                background: {BG_CARD}; border: none; width: 16px;
+            }}
+        """)
         tw.addWidget(self.win_spin)
         sl.addLayout(tw)
 
-        self.pause_btn = QtWidgets.QPushButton("Pause")
-        self.pause_btn.setCheckable(True)
-        sl.addWidget(self.pause_btn)
+        sl.addWidget(self._sep())
 
-        ref_btn = QtWidgets.QPushButton("Re-discover streams")
-        ref_btn.clicked.connect(self._start_resolver)
-        sl.addWidget(ref_btn)
+        # ── Recording section ──
+        sec_rec = QtWidgets.QLabel("RECORDING")
+        sec_rec.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold; letter-spacing: 2px;")
+        sl.addWidget(sec_rec)
 
-        # ── Recording controls ──
-        sl.addWidget(self._hline())
-        rec_row = QtWidgets.QHBoxLayout()
+        rec_row = QtWidgets.QHBoxLayout(); rec_row.setSpacing(6)
         self.rec_btn = QtWidgets.QPushButton("  REC")
         self.rec_btn.setCheckable(True)
-        self.rec_btn.setStyleSheet(
-            "QPushButton { font-weight: bold; }"
-            "QPushButton:checked { background-color: #cc2222; color: white; }")
+        self.rec_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {BG_CARD}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 5px 12px; font-weight: bold; font-size: 12px;
+            }}
+            QPushButton:hover {{ border-color: {RED_REC}; }}
+            QPushButton:checked {{
+                background: {RED_REC}; color: white; border-color: {RED_REC};
+            }}
+        """)
         self.rec_btn.clicked.connect(self._toggle_recording)
         rec_row.addWidget(self.rec_btn)
         self.rec_name = QtWidgets.QLineEdit()
-        self.rec_name.setPlaceholderText("filename (default: datetime)")
+        self.rec_name.setPlaceholderText("filename (datetime)")
+        self.rec_name.setStyleSheet(f"""
+            QLineEdit {{
+                background: {BG_INPUT}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 5px 8px; font-size: 12px;
+            }}
+            QLineEdit:focus {{ border-color: {ACCENT}; }}
+        """)
         rec_row.addWidget(self.rec_name)
         sl.addLayout(rec_row)
         self.rec_status = QtWidgets.QLabel("")
-        self.rec_status.setStyleSheet("font-size: 11px; color: #aaaaaa;")
+        self.rec_status.setStyleSheet(f"font-size: 10px; color: {TEXT_DIM};")
         self.rec_status.setWordWrap(True)
         sl.addWidget(self.rec_status)
 
@@ -362,43 +452,95 @@ class Viewer(QtWidgets.QMainWindow):
         self._rec_file: str = ""
         self._rec_start_time: float = 0.0
 
-        sl.addWidget(self._hline())
-        self.delay_lbl = QtWidgets.QLabel("Delays: --")
-        self.delay_lbl.setWordWrap(True)
-        sl.addWidget(self.delay_lbl)
+        sl.addWidget(self._sep())
 
-        # BPM / HRV display
-        sl.addWidget(self._hline())
+        # ── Vitals ──
         self.hr_lbl = QtWidgets.QLabel("")
-        self.hr_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #ff4444;")
-        self.hr_lbl.setWordWrap(True)
+        self.hr_lbl.setStyleSheet(f"""
+            font-family: 'Montserrat Bold', 'Montserrat', sans-serif;
+            font-size: 26px; font-weight: bold; color: {ACCENT};
+        """)
         sl.addWidget(self.hr_lbl)
         self.hrv_lbl = QtWidgets.QLabel("")
-        self.hrv_lbl.setStyleSheet("font-size: 13px; color: #aaaaaa;")
+        self.hrv_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT_DIM};")
         self.hrv_lbl.setWordWrap(True)
         sl.addWidget(self.hrv_lbl)
 
-        sl.addWidget(self._hline())
+        self.delay_lbl = QtWidgets.QLabel("Delays: --")
+        self.delay_lbl.setStyleSheet(f"font-size: 10px; color: {GRAY};")
+        self.delay_lbl.setWordWrap(True)
+        sl.addWidget(self.delay_lbl)
 
-        scr = QtWidgets.QScrollArea(); scr.setWidgetResizable(True)
+        sl.addWidget(self._sep())
+
+        # ── Streams / Channels section ──
+        sec_ch = QtWidgets.QLabel("STREAMS")
+        sec_ch.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold; letter-spacing: 2px;")
+        sl.addWidget(sec_ch)
+
+        # Toggle All button at the top, always visible
+        self.toggle_all_btn = QtWidgets.QPushButton("Toggle All Channels")
+        self._style_btn(self.toggle_all_btn, small=True)
+        self.toggle_all_btn.clicked.connect(self._toggle_all_channels)
+        sl.addWidget(self.toggle_all_btn)
+
+        scr = QtWidgets.QScrollArea()
+        scr.setWidgetResizable(True)
+        scr.setStyleSheet(f"""
+            QScrollArea {{ border: none; background: transparent; }}
+            QScrollBar:vertical {{
+                background: {BG_PANEL}; width: 6px; margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {BORDER}; border-radius: 3px; min-height: 20px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        """)
         self.ch_widget = QtWidgets.QWidget()
         self.ch_lay = QtWidgets.QVBoxLayout(self.ch_widget)
         self.ch_lay.setAlignment(QtCore.Qt.AlignTop)
+        self.ch_lay.setSpacing(2)
+        self.ch_lay.setContentsMargins(0, 0, 0, 0)
         scr.setWidget(self.ch_widget)
         sl.addWidget(scr, stretch=1)
         sp.addWidget(side)
 
         self.pw = pg.GraphicsLayoutWidget()
-        self.pw.setBackground("k")
+        self.pw.setBackground(BG_DARK)
         sp.addWidget(self.pw)
         sp.setStretchFactor(0, 0); sp.setStretchFactor(1, 1)
-        sp.setSizes([350, 1050])
+        sp.setSizes([320, 1080])
+
+    def _toggle_all_channels(self):
+        """Toggle visibility of all channels across all streams."""
+        if not self.rows:
+            return
+        on = any(r.cb.isChecked() for r in self.rows)
+        for r in self.rows:
+            r.cb.setChecked(not on)
+
+    def _style_btn(self, btn, small=False):
+        """Apply consistent button styling."""
+        pad = "3px 8px" if small else "5px 12px"
+        fs = "11px" if small else "12px"
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {BG_CARD}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: {pad}; font-size: {fs};
+            }}
+            QPushButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}
+            QPushButton:pressed {{ background: {ACCENT_DIM}; color: white; }}
+            QPushButton:checked {{ background: {ACCENT}; color: white; border-color: {ACCENT}; }}
+        """)
 
     @staticmethod
-    def _hline():
+    def _sep():
+        """Subtle separator line."""
         f = QtWidgets.QFrame()
         f.setFrameShape(QtWidgets.QFrame.HLine)
-        f.setFrameShadow(QtWidgets.QFrame.Sunken)
+        f.setFixedHeight(1)
+        f.setStyleSheet(f"background: {BORDER}; border: none;")
         return f
 
     # ── background stream discovery ──────────────────────────────────────
@@ -466,49 +608,50 @@ class Viewer(QtWidgets.QMainWindow):
             self._rebuild_plots()
 
     def _add_stream_ui(self, key: str, st: StreamState):
+        # Stream header card
         hw = QtWidgets.QWidget()
-        hl = QtWidgets.QHBoxLayout(hw); hl.setContentsMargins(0, 4, 0, 0)
-        lbl = QtWidgets.QLabel(f"<b>{st.name}</b> <small>({st.stype}, "
-                               f"{st.srate:.0f}Hz, {len(st.ch_labels)}ch)</small>")
-        lbl.setWordWrap(True)
+        hw.setStyleSheet(f"""
+            QWidget {{ background: {BG_CARD}; border-radius: 6px; }}
+        """)
+        hl = QtWidgets.QHBoxLayout(hw)
+        hl.setContentsMargins(10, 6, 10, 6)
+        lbl = QtWidgets.QLabel(
+            f"<span style='color:{TEXT_PRIMARY}; font-weight:600;'>{st.name}</span>"
+            f"<br><span style='color:{GRAY}; font-size:10px;'>"
+            f"{st.stype} | {st.srate:.0f} Hz | {len(st.ch_labels)} ch</span>")
         hl.addWidget(lbl, stretch=1)
         rec_cb = QtWidgets.QCheckBox("REC")
         rec_cb.setChecked(True)
         rec_cb.setToolTip("Include this stream in recording")
-        rec_cb.setStyleSheet("QCheckBox { color: #ff6666; }")
+        rec_cb.setStyleSheet(f"""
+            QCheckBox {{ color: {RED_REC}; font-size: 11px; font-weight: bold; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; }}
+        """)
         hl.addWidget(rec_cb)
-        # Store reference for recording filter
         if not hasattr(self, '_stream_rec_cbs'):
             self._stream_rec_cbs: Dict[str, QtWidgets.QCheckBox] = {}
         self._stream_rec_cbs[key] = rec_cb
-        tb = QtWidgets.QPushButton("Toggle all"); tb.setFixedWidth(80)
-        hl.addWidget(tb)
         self.ch_lay.addWidget(hw)
 
+        # Channel rows
         cbs: List[QtWidgets.QCheckBox] = []
         for ci, cl in enumerate(st.ch_labels):
             rw = QtWidgets.QWidget()
             rl = QtWidgets.QHBoxLayout(rw)
-            rl.setContentsMargins(12, 0, 0, 0); rl.setSpacing(6)
+            rl.setContentsMargins(14, 1, 4, 1); rl.setSpacing(6)
             color = COLORS[self._color_idx % len(COLORS)]; self._color_idx += 1
-            sw = QtWidgets.QLabel("\u25a0")
-            sw.setStyleSheet(f"color:{color}; font-size:14px")
+            dot = QtWidgets.QLabel("\u25cf")
+            dot.setStyleSheet(f"color:{color}; font-size:10px;")
+            dot.setFixedWidth(14)
             cb = QtWidgets.QCheckBox(cl); cb.setChecked(True)
+            cb.setStyleSheet(f"QCheckBox {{ color: {TEXT_PRIMARY}; font-size: 12px; }}")
             ys = YScaleWidget()
-            rl.addWidget(sw); rl.addWidget(cb); rl.addWidget(ys, stretch=1)
+            rl.addWidget(dot); rl.addWidget(cb); rl.addWidget(ys, stretch=1)
             self.ch_lay.addWidget(rw)
             self.rows.append(ChRow(skey=key, ci=ci,
                                    label=f"{st.name}/{cl}", cb=cb,
                                    ys=ys, color=color))
             cbs.append(cb)
-
-        def _make_toggle(cbs=cbs):
-            def _t():
-                on = any(c.isChecked() for c in cbs)
-                for c in cbs: c.setChecked(not on)
-            return _t
-        tb.clicked.connect(_make_toggle())
-        self.ch_lay.addWidget(self._hline())
 
     # ── plot management ──────────────────────────────────────────────────
 
@@ -519,14 +662,23 @@ class Viewer(QtWidgets.QMainWindow):
             if not cr.cb.isChecked():
                 cr.curve = cr.plot = None; cr.beat_scatter = None; continue
             p = self.pw.addPlot(row=ri, col=0); ri += 1
-            p.setLabel("left", cr.label)
-            p.setLabel("bottom", "time (s)")
-            p.showGrid(x=True, y=True, alpha=0.3)
+
+            # Themed axis styling
+            for axis_name in ('left', 'bottom'):
+                ax = p.getAxis(axis_name)
+                ax.setPen(pg.mkPen(color=BORDER, width=1))
+                ax.setTextPen(pg.mkPen(color=GRAY))
+                ax.setStyle(tickFont=QtGui.QFont("Montserrat", 8))
+
+            # Short label (just channel name, not full stream/channel)
+            short = cr.label.split("/")[-1] if "/" in cr.label else cr.label
+            p.setLabel("left", short, color=GRAY, **{"font-size": "10px"})
+            p.setLabel("bottom", "time (s)", color=GRAY, **{"font-size": "9px"})
+            p.showGrid(x=True, y=True, alpha=0.08)
             p.enableAutoRange(axis='y')
             p.disableAutoRange(axis='x')
-            # Fix alignment: set fixed width for left axis
             p.getAxis('left').setWidth(Y_AXIS_WIDTH)
-            pen = pg.mkPen(color=cr.color, width=1)
+            pen = pg.mkPen(color=cr.color, width=1.2)
             cr.curve = p.plot(pen=pen, connect="finite")
             cr.curve.setClipToView(True)
             # Add beat scatter for ECG channels
@@ -814,7 +966,7 @@ class Viewer(QtWidgets.QMainWindow):
             for cb in self._stream_rec_cbs.values():
                 cb.setEnabled(False)
             self.rec_status.setText(f"Recording to: {name}")
-            self.rec_status.setStyleSheet("font-size: 11px; color: #ff4444;")
+            self.rec_status.setStyleSheet(f"font-size: 10px; color: {RED_REC};")
             print(f"[REC] Started: {' '.join(cmd)}")
         except Exception as e:
             self.rec_status.setText(f"ERROR: {e}")
@@ -844,7 +996,7 @@ class Viewer(QtWidgets.QMainWindow):
         # Re-enable REC checkboxes
         for cb in self._stream_rec_cbs.values():
             cb.setEnabled(True)
-        self.rec_status.setStyleSheet("font-size: 11px; color: #44cc44;")
+        self.rec_status.setStyleSheet(f"font-size: 10px; color: {GREEN_OK};")
         print(f"[REC] Stopped. File: {self._rec_file} ({elapsed:.1f}s)")
 
         # Export CSVs from XDF in background
@@ -1069,21 +1221,44 @@ class Viewer(QtWidgets.QMainWindow):
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+def _load_fonts():
+    """Load bundled Montserrat fonts."""
+    db = QtGui.QFontDatabase
+    if os.path.isdir(_FONT_DIR):
+        for fn in os.listdir(_FONT_DIR):
+            if fn.endswith(".ttf"):
+                fid = db.addApplicationFont(os.path.join(_FONT_DIR, fn))
+                if fid >= 0:
+                    families = db.applicationFontFamilies(fid)
+                    if families:
+                        print(f"[Font] loaded: {families[0]} ({fn})")
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    _load_fonts()
     app.setStyle("Fusion")
+
+    # Dark palette matching BiHome theme
     pal = QtGui.QPalette()
     for role, c in [
-        (QtGui.QPalette.Window, (30, 30, 30)),
-        (QtGui.QPalette.WindowText, (220, 220, 220)),
-        (QtGui.QPalette.Base, (40, 40, 40)),
-        (QtGui.QPalette.Text, (220, 220, 220)),
-        (QtGui.QPalette.Button, (50, 50, 50)),
-        (QtGui.QPalette.ButtonText, (220, 220, 220)),
-        (QtGui.QPalette.Highlight, (42, 130, 218)),
+        (QtGui.QPalette.Window, QtGui.QColor(BG_DARK)),
+        (QtGui.QPalette.WindowText, QtGui.QColor(TEXT_PRIMARY)),
+        (QtGui.QPalette.Base, QtGui.QColor(BG_INPUT)),
+        (QtGui.QPalette.AlternateBase, QtGui.QColor(BG_CARD)),
+        (QtGui.QPalette.Text, QtGui.QColor(TEXT_PRIMARY)),
+        (QtGui.QPalette.Button, QtGui.QColor(BG_CARD)),
+        (QtGui.QPalette.ButtonText, QtGui.QColor(TEXT_PRIMARY)),
+        (QtGui.QPalette.Highlight, QtGui.QColor(ACCENT)),
+        (QtGui.QPalette.HighlightedText, QtGui.QColor("#ffffff")),
+        (QtGui.QPalette.ToolTipBase, QtGui.QColor(BG_CARD)),
+        (QtGui.QPalette.ToolTipText, QtGui.QColor(TEXT_PRIMARY)),
     ]:
-        pal.setColor(role, QtGui.QColor(*c))
+        pal.setColor(role, c)
     app.setPalette(pal)
+
+    # Global font
+    app.setFont(QtGui.QFont("Montserrat", 10))
+
     v = Viewer(); v.show()
     sys.exit(app.exec_())
 
