@@ -558,12 +558,14 @@ class Viewer(QtWidgets.QMainWindow):
         win = self.win_spin.value()
         t_ref = self._t_ref
 
-        # per-stream latest timestamp and delay
+        # per-stream smooth scroll edge: use wall clock minus EMA delay
+        # so scrolling is driven by the smooth local clock, not by the
+        # bursty data arrival (~560ms Polar notification interval)
         stream_tend: Dict[str, float] = {}
         parts = []
         for key, st in self.streams.items():
             if st.latest_ts > 0:
-                stream_tend[key] = st.latest_ts
+                stream_tend[key] = now - st.delay  # smooth: advances with wall clock
                 parts.append(f"{st.name}: {st.delay * 1000:.0f}ms")
 
         # visibility change?
