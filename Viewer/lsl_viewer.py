@@ -290,7 +290,8 @@ class ChRow:
     curve: object = None
     plot: object = None
     color: str = ""
-    beat_scatter: object = None   # scatter plot for beat markers on ECG
+    beat_scatter: object = None
+    row_widget: object = None     # the QWidget container for this row
 
 
 # ── main window ──────────────────────────────────────────────────────────────
@@ -636,14 +637,15 @@ class Viewer(QtWidgets.QMainWindow):
         self._stream_rec_cbs[key] = rec_cb
         self.ch_lay.addWidget(hw)
 
-        # Column headers
+        # Column headers (inside scroll area, moves with content)
         hdr = QtWidgets.QWidget()
         hdr_l = QtWidgets.QHBoxLayout(hdr)
-        hdr_l.setContentsMargins(4, 2, 4, 0); hdr_l.setSpacing(4)
-        hdr_ch = QtWidgets.QLabel("channel")
-        hdr_ch.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
-        hdr_ch.setMinimumWidth(90)
-        hdr_l.addWidget(hdr_ch)
+        hdr_l.setContentsMargins(22, 4, 4, 0); hdr_l.setSpacing(4)
+        # Spacer for arrow column
+        self._hdr_ch_lbl = QtWidgets.QLabel("channel")
+        self._hdr_ch_lbl.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
+        self._hdr_ch_lbl.setMinimumWidth(90)
+        hdr_l.addWidget(self._hdr_ch_lbl)
         for h in ("auto", "min", "max"):
             hl2 = QtWidgets.QLabel(h)
             hl2.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
@@ -651,31 +653,56 @@ class Viewer(QtWidgets.QMainWindow):
             if h == "auto":
                 hl2.setFixedWidth(32)
             else:
-                hl2.setMinimumWidth(62)
+                hl2.setMinimumWidth(56)
             hdr_l.addWidget(hl2)
         hdr_l.addStretch()
         self.ch_lay.addWidget(hdr)
 
-        # Channel rows — colored toggle button + aligned auto/min/max
+        # Channel rows — arrows + colored toggle button + aligned auto/min/max
         cbs: List[QtWidgets.QCheckBox] = []
         ch_btns: List[QtWidgets.QPushButton] = []
+        row_widgets: List[QtWidgets.QWidget] = []
+        first_row_idx = len(self.rows)  # index of first row in this stream
+
         for ci, cl in enumerate(st.ch_labels):
             rw = QtWidgets.QWidget()
             rl = QtWidgets.QHBoxLayout(rw)
-            rl.setContentsMargins(4, 1, 4, 1); rl.setSpacing(4)
+            rl.setContentsMargins(0, 1, 4, 1); rl.setSpacing(2)
             color = COLORS[self._color_idx % len(COLORS)]; self._color_idx += 1
 
-            # Toggle button: colored when active, gray when off
+            # Up/down arrows for reordering
+            arrow_style = f"""
+                QPushButton {{
+                    background: transparent; color: {GRAY};
+                    border: none; font-size: 9px; padding: 0;
+                    min-width: 10px; max-width: 10px;
+                }}
+                QPushButton:hover {{ color: {ACCENT}; }}
+            """
+            up_btn = QtWidgets.QPushButton("\u25b2")
+            up_btn.setStyleSheet(arrow_style)
+            up_btn.setFixedSize(10, 12)
+            dn_btn = QtWidgets.QPushButton("\u25bc")
+            dn_btn.setStyleSheet(arrow_style)
+            dn_btn.setFixedSize(10, 12)
+            arrow_w = QtWidgets.QWidget()
+            arrow_w.setFixedWidth(12)
+            al = QtWidgets.QVBoxLayout(arrow_w)
+            al.setContentsMargins(0, 0, 0, 0); al.setSpacing(0)
+            al.addWidget(up_btn)
+            al.addWidget(dn_btn)
+            rl.addWidget(arrow_w)
+
+            # Toggle button
             btn = QtWidgets.QPushButton(cl)
             btn.setCheckable(True)
             btn.setChecked(True)
             btn.setMinimumWidth(90)
-            # Convert hex color to rgba for transparent fill
             r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
             btn.setStyleSheet(f"""
                 QPushButton {{
                     background: rgba({r},{g},{b},0.12); color: {color};
-                    border: 1.5px solid {color}; border-radius: 4px;
+                    border: 1px solid {color}; border-radius: 4px;
                     padding: 4px 10px; font-size: 11px; font-weight: 600;
                     text-align: left;
                 }}
@@ -691,10 +718,8 @@ class Viewer(QtWidgets.QMainWindow):
                     background: rgba({r},{g},{b},0.08);
                 }}
             """)
-            # We use a hidden QCheckBox for compatibility with existing code
             cb = QtWidgets.QCheckBox()
-            cb.setChecked(True)
-            cb.setVisible(False)
+            cb.setChecked(True); cb.setVisible(False)
             btn.toggled.connect(cb.setChecked)
             cb.toggled.connect(btn.setChecked)
             rl.addWidget(btn)
@@ -703,23 +728,104 @@ class Viewer(QtWidgets.QMainWindow):
             ys = YScaleWidget()
             rl.addWidget(ys)
             self.ch_lay.addWidget(rw)
+            row_widgets.append(rw)
+
+            row_idx = len(self.rows)
             self.rows.append(ChRow(skey=key, ci=ci,
                                    label=f"{st.name}/{cl}", cb=cb,
-                                   ys=ys, color=color))
+                                   ys=ys, color=color, row_widget=rw))
             cbs.append(cb)
 
-        # Make all channel buttons the same width (widest label)
+            # Connect arrows (capture row_idx by default arg)
+            up_btn.clicked.connect(lambda _, ri=row_idx: self._move_channel(ri, -1))
+            dn_btn.clicked.connect(lambda _, ri=row_idx: self._move_channel(ri, +1))
+
+        # Equalize button widths + sync header column width
         QtCore.QTimer.singleShot(0, lambda btns=ch_btns: self._equalize_btn_widths(btns))
 
     @staticmethod
     def _equalize_btn_widths(btns):
-        """Set all buttons to the width of the widest one."""
         if not btns:
             return
         max_w = max(b.sizeHint().width() for b in btns)
         max_w = max(max_w, 80)
         for b in btns:
             b.setFixedWidth(max_w)
+
+    def _move_channel(self, row_idx: int, direction: int):
+        """Move a channel row up (-1) or down (+1) and rebuild plots."""
+        target = row_idx + direction
+        if target < 0 or target >= len(self.rows):
+            return
+        # Swap in the rows list
+        self.rows[row_idx], self.rows[target] = self.rows[target], self.rows[row_idx]
+        # Rebuild the layout to reflect new order
+        # (keeping widgets, just reordering in the layout)
+        self._rebuild_channel_layout()
+        self._rebuild_plots()
+
+    def _rebuild_channel_layout(self):
+        """Reorder channel row widgets in the layout to match self.rows order."""
+        # Detach all widgets from layout (without destroying them)
+        detached = []
+        while self.ch_lay.count():
+            item = self.ch_lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                detached.append(w)
+
+        # Re-add: stream headers + column headers + rows in self.rows order
+        seen_streams = set()
+        # Collect non-row widgets (headers) by stream key
+        # We stored them in detached but can't easily identify them,
+        # so we recreate the lightweight headers
+        for cr in self.rows:
+            skey = cr.skey
+            if skey not in seen_streams:
+                seen_streams.add(skey)
+                st = self.streams[skey]
+                # Stream header
+                hw = QtWidgets.QWidget()
+                hw.setStyleSheet(f"QWidget {{ background: {BG_CARD}; border-radius: 6px; }}")
+                hl = QtWidgets.QHBoxLayout(hw)
+                hl.setContentsMargins(10, 6, 10, 6)
+                lbl = QtWidgets.QLabel(
+                    f"<span style='color:{TEXT_PRIMARY}; font-weight:600;'>{st.name}</span>"
+                    f"<br><span style='color:{GRAY}; font-size:10px;'>"
+                    f"{st.stype} | {st.srate:.0f} Hz | {len(st.ch_labels)} ch</span>")
+                hl.addWidget(lbl, stretch=1)
+                rec_cb = self._stream_rec_cbs.get(skey)
+                if rec_cb:
+                    rec_cb.setParent(None)
+                    hl.addWidget(rec_cb)
+                self.ch_lay.addWidget(hw)
+                # Column header
+                hdr = QtWidgets.QWidget()
+                hdr_l = QtWidgets.QHBoxLayout(hdr)
+                hdr_l.setContentsMargins(22, 4, 4, 0); hdr_l.setSpacing(4)
+                hdr_ch = QtWidgets.QLabel("channel")
+                hdr_ch.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
+                hdr_ch.setMinimumWidth(90)
+                hdr_l.addWidget(hdr_ch)
+                for h in ("auto", "min", "max"):
+                    hl2 = QtWidgets.QLabel(h)
+                    hl2.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
+                    hl2.setAlignment(QtCore.Qt.AlignCenter)
+                    hl2.setFixedWidth(32 if h == "auto" else 56)
+                    hdr_l.addWidget(hl2)
+                hdr_l.addStretch()
+                self.ch_lay.addWidget(hdr)
+
+            # Re-add the channel row widget
+            if cr.row_widget:
+                cr.row_widget.setParent(None)  # detach first
+                self.ch_lay.addWidget(cr.row_widget)
+
+        # Clean up old detached widgets (headers that won't be reused)
+        for w in detached:
+            if w.parent() is None:
+                w.deleteLater()
 
     # ── plot management ──────────────────────────────────────────────────
 
