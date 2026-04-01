@@ -623,8 +623,7 @@ class Viewer(QtWidgets.QMainWindow):
                 if cr.skey not in self._diag_done and len(ts) > 50:
                     self._dump_csv(cr.skey, t_min)
 
-                x = ts - t_ref
-                self._cached_data[ri] = (x, vs)
+                self._cached_data[ri] = (ts, vs)  # store absolute timestamps
 
                 # Beat markers for ECG
                 if cr.beat_scatter is not None and beat_ts_arr is not None and len(beat_ts_arr) > 0:
@@ -636,7 +635,7 @@ class Viewer(QtWidgets.QMainWindow):
                     else:
                         self._cached_beat_map[ri] = (np.empty(0), np.empty(0))
 
-        # Fast path: update plots from cached data + scroll
+        # Fast path: clip cached data to smoothly advancing t_end, update plots
         for ri, cr in enumerate(self.rows):
             if cr.curve is None or cr.plot is None:
                 continue
@@ -648,17 +647,22 @@ class Viewer(QtWidgets.QMainWindow):
             cached = self._cached_data.get(ri)
             if cached is None:
                 continue
-            x, vs = cached
+            ts_abs, vs_all = cached
 
-            if len(x) == 0:
+            if len(ts_abs) == 0:
                 cr.curve.setData([], [])
                 if cr.beat_scatter:
                     cr.beat_scatter.setData([], [])
                 continue
 
-            if recompute:
-                cr.curve.setData(x, vs)
+            # Clip right edge to t_end — reveals points gradually as
+            # wall clock advances, instead of showing entire burst at once
+            rmask = ts_abs <= t_end
+            ts_vis = ts_abs[rmask]
+            vs_vis = vs_all[rmask]
 
+            x = ts_vis - t_ref
+            cr.curve.setData(x, vs_vis)
             cr.plot.setXRange(xl, xr, padding=0)
 
             # Beat scatter
@@ -667,16 +671,15 @@ class Viewer(QtWidgets.QMainWindow):
                 if bt is not None and len(bt[0]) > 0:
                     bt_x, bt_y = bt
                     vis = (bt_x >= xl) & (bt_x <= xr)
-                    if recompute:
-                        cr.beat_scatter.setData(bt_x[vis], bt_y[vis])
-                elif recompute:
+                    cr.beat_scatter.setData(bt_x[vis], bt_y[vis])
+                else:
                     cr.beat_scatter.setData([], [])
 
-            # Y range
+            # Y range (only on recompute to avoid jitter)
             if recompute:
                 if cr.ys.is_auto():
-                    ymn = float(np.nanmin(vs))
-                    ymx = float(np.nanmax(vs))
+                    ymn = float(np.nanmin(vs_vis)) if len(vs_vis) > 0 else 0
+                    ymx = float(np.nanmax(vs_vis)) if len(vs_vis) > 0 else 1
                     if np.isnan(ymn) or np.isnan(ymx):
                         continue
                     mg = (ymx - ymn) * 0.08
