@@ -840,15 +840,24 @@ class Viewer(QtWidgets.QMainWindow):
                             if len(beat_times) > 0 and len(e_ts) > 10:
                                 dot_x, dot_y = [], []
                                 for bt in beat_times:
-                                    # Search for the tallest positive peak
+                                    # Search for the sharpest positive peak (highest derivative)
+                                    # in [bt-0.5, bt] — R-peaks have much steeper slopes than T-waves
                                     win_mask = (e_ts >= bt - 0.5) & (e_ts <= bt)
-                                    if not np.any(win_mask):
+                                    if np.sum(win_mask) < 4:
                                         continue
                                     win_vs = e_vs[win_mask]
                                     win_ts = e_ts[win_mask]
-                                    pk_idx = int(np.argmax(win_vs))
-                                    dot_x.append(win_ts[pk_idx] - t_ref)
-                                    dot_y.append(win_vs[pk_idx])
+                                    # Compute absolute derivative
+                                    dv = np.abs(np.diff(win_vs))
+                                    # Find the steepest point, then pick the local max around it
+                                    steep_idx = int(np.argmax(dv))
+                                    # The R-peak is at or just after the steepest upslope
+                                    # Search a small window around steep_idx for the max value
+                                    lo = max(0, steep_idx - 2)
+                                    hi = min(len(win_vs) - 1, steep_idx + 4)
+                                    local_pk = lo + int(np.argmax(win_vs[lo:hi+1]))
+                                    dot_x.append(win_ts[local_pk] - t_ref)
+                                    dot_y.append(win_vs[local_pk])
                                 self._cached_beat_map[ri] = (
                                     np.array(dot_x), np.array(dot_y))
                             else:

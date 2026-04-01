@@ -515,13 +515,12 @@ class PolarECGImputer:
     LOCAL_WIN   = 5       # half-width for local-max check (samples, ~38 ms at 130 Hz)
     MIN_RR_S    = 0.35    # fastest plausible heart rate (~170 bpm)
     MAX_RR_S    = 1.60    # slowest plausible heart rate (~37 bpm)
-    REFRACT_S   = 0.35    # min time between two accepted peaks
+    REFRACT_S   = 0.40    # min time between two accepted peaks (was 0.35)
     AMP_FRAC    = 0.55    # beat must reach ≥ 55 % of the adaptive peak-amplitude EMA
     MIN_AMP_UV  = 60.0    # µV — fallback threshold before EMA is initialised
-                          # (local amplitude over ±5 samples / 38 ms, not full window)
-    SHARP_FRAC  = 0.40    # sharpness: signal must change ≥ 40 % of amplitude in LOCAL_WIN
-                          # samples before the peak — R-peaks (20–40 ms upstroke) pass,
-                          # T-waves (80–150 ms upstroke) are rejected
+    SHARP_FRAC  = 0.50    # sharpness: signal must change ≥ 50 % of amplitude in LOCAL_WIN
+                          # (was 0.40 — tightened to reject borderline T-waves)
+    MAX_DERIV_WIN = 3     # half-width for max-derivative check (samples, ~23ms)
     MAX_BEATS   = 8       # beats kept in template average
     MAX_RR_HIST = 10      # RR intervals kept for heart-rate estimate
 
@@ -662,20 +661,29 @@ class PolarECGImputer:
         if not is_local_ext:
             return
 
-        # Sharpness check: in LOCAL_WIN samples (~38 ms) before the peak the signal
-        # must have changed by ≥ SHARP_FRAC of the candidate's own amplitude (amp).
-        # Using amp (not the full-window range) is critical: at normal heart rates
-        # the PRE+POST window (~0.65 s) spans two R-peaks, making the full-window
-        # range enormous and the threshold impossible even for real R-peaks.
-        # R-peaks rise steeply (20–40 ms upstroke) → upslope/amp ≈ 0.7–0.9 → pass.
-        # T-waves rise slowly (80–150 ms upstroke) → upslope/amp ≈ 0.1–0.3 → reject.
+        # Sharpness check 1: upslope over LOCAL_WIN samples
         slope_start = max(0, ci - self.LOCAL_WIN)
         upslope = abs(cval - self._buf_v[slope_start])
         if amp > 0 and upslope < amp * self.SHARP_FRAC:
             return
 
-        # Adaptive amplitude threshold: 40 % of recent peak EMA, or MIN_AMP_UV
-        # as fallback before the EMA is initialised.
+        # Sharpness check 2: max sample-to-sample derivative near the peak.
+        # R-peaks have derivatives 5–10x steeper than T-waves.  We require
+        # the max |diff| in ±MAX_DERIV_WIN around the candidate to exceed
+        # 20% of the candidate's amplitude PER SAMPLE.  At 130 Hz:
+        #   R-peak: rises ~800 µV in 2–3 samples → |diff| ≈ 300 µV/sample
+        #   T-wave: rises ~200 µV in 10+ samples → |diff| ≈ 20 µV/sample
+        dlo = max(1, ci - self.MAX_DERIV_WIN)
+        dhi = min(n - 1, ci + self.MAX_DERIV_WIN)
+        max_diff = 0.0
+        for di in range(dlo, dhi + 1):
+            d = abs(self._buf_v[di] - self._buf_v[di - 1])
+            if d > max_diff:
+                max_diff = d
+        if amp > 0 and max_diff < amp * 0.20:
+            return
+
+        # Adaptive amplitude threshold
         threshold = (self._peak_amp_ema * self.AMP_FRAC
                      if self._peak_amp_ema is not None
                      else self.MIN_AMP_UV)
