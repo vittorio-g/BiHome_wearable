@@ -31,6 +31,7 @@ PULL_CHUNK = 1024
 REDISCOVER_S = 5.0
 SNAPSHOT_TAIL = 5000      # max samples processed per snapshot (~38s @ 130 Hz)
 Y_AXIS_WIDTH = 80         # fixed pixel width for left Y-axis labels (alignment)
+BEAT_SHIFT_S = 0.40       # beat detection delay (POST_S) — shift beat channel left
 COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -686,6 +687,9 @@ class Viewer(QtWidgets.QMainWindow):
             vs_vis = vs_all[rmask]
 
             x = ts_vis - t_ref
+            # Shift beat channel left by POST_S to align with ECG spikes
+            if cr.label.lower().endswith("/beat"):
+                x = x - BEAT_SHIFT_S
             cr.curve.setData(x, vs_vis)
             cr.plot.setXRange(xl, xr, padding=0)
 
