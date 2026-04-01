@@ -448,12 +448,13 @@ class Viewer(QtWidgets.QMainWindow):
         ctrl = QtWidgets.QHBoxLayout(); ctrl.setSpacing(6)
         self.pause_btn = QtWidgets.QPushButton("Pause")
         self.pause_btn.setCheckable(True)
+        self.pause_btn.toggled.connect(self._on_pause_toggled)
         self._style_btn(self.pause_btn)
         ctrl.addWidget(self.pause_btn)
 
         ref_btn = QtWidgets.QPushButton("Refresh")
         self._style_btn(ref_btn)
-        ref_btn.clicked.connect(self._start_resolver)
+        ref_btn.clicked.connect(self._on_refresh)
         ctrl.addWidget(ref_btn)
         sl.addLayout(ctrl)
 
@@ -590,6 +591,23 @@ class Viewer(QtWidgets.QMainWindow):
         on = any(r.cb.isChecked() for r in self.rows)
         for r in self.rows:
             r.cb.setChecked(not on)
+
+    def _jump_to_live(self):
+        """Reset draw cursors to latest data — jumps to live edge."""
+        self._draw_cursor.clear()
+        self._cached_data.clear()
+        self._cached_beat_map.clear()
+        self._frame_count = 0  # force recompute on next frame
+
+    def _on_pause_toggled(self, checked):
+        if not checked:
+            # Unpaused → jump to live
+            self._jump_to_live()
+
+    def _on_refresh(self):
+        """Re-discover streams AND jump to live."""
+        self._start_resolver()
+        self._jump_to_live()
 
     def _style_btn(self, btn, small=False):
         """Apply consistent button styling."""
