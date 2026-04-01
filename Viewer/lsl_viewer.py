@@ -10,7 +10,7 @@ BPM and HRV computation from beat channel, beat markers on ECG.
 """
 from __future__ import annotations
 
-import os, sys, time, threading
+import os, sys, time, threading, subprocess, signal
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -32,6 +32,12 @@ REDISCOVER_S = 5.0
 SNAPSHOT_TAIL = 5000      # max samples processed per snapshot (~38s @ 130 Hz)
 Y_AXIS_WIDTH = 80         # fixed pixel width for left Y-axis labels (alignment)
 BEAT_SHIFT_S = 0.40       # beat detection delay (POST_S) — shift beat channel left
+
+# LabRecorder paths (relative to this file's directory)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REC_DIR = os.path.join(os.path.dirname(_HERE), "LabRecorder")
+LABRECORDER_CLI = os.path.join(_REC_DIR, "LabRecorderCLI.exe")
+RECORDINGS_DIR = os.path.join(_HERE, "recordings")
 COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -329,6 +335,30 @@ class Viewer(QtWidgets.QMainWindow):
         ref_btn = QtWidgets.QPushButton("Re-discover streams")
         ref_btn.clicked.connect(self._start_resolver)
         sl.addWidget(ref_btn)
+
+        # ── Recording controls ──
+        sl.addWidget(self._hline())
+        rec_row = QtWidgets.QHBoxLayout()
+        self.rec_btn = QtWidgets.QPushButton("  REC")
+        self.rec_btn.setCheckable(True)
+        self.rec_btn.setStyleSheet(
+            "QPushButton { font-weight: bold; }"
+            "QPushButton:checked { background-color: #cc2222; color: white; }")
+        self.rec_btn.clicked.connect(self._toggle_recording)
+        rec_row.addWidget(self.rec_btn)
+        self.rec_name = QtWidgets.QLineEdit()
+        self.rec_name.setPlaceholderText("filename (default: datetime)")
+        rec_row.addWidget(self.rec_name)
+        sl.addLayout(rec_row)
+        self.rec_status = QtWidgets.QLabel("")
+        self.rec_status.setStyleSheet("font-size: 11px; color: #aaaaaa;")
+        self.rec_status.setWordWrap(True)
+        sl.addWidget(self.rec_status)
+
+        # Recording state
+        self._rec_proc: Optional[subprocess.Popen] = None
+        self._rec_file: str = ""
+        self._rec_start_time: float = 0.0
 
         sl.addWidget(self._hline())
         self.delay_lbl = QtWidgets.QLabel("Delays: --")
@@ -718,6 +748,90 @@ class Viewer(QtWidgets.QMainWindow):
                     a, b = cr.ys.manual()
                     cr.plot.setYRange(a, b, padding=0)
 
+    # ── LabRecorder integration ────────────────────────────────────────
+
+    def _toggle_recording(self):
+        if self.rec_btn.isChecked():
+            self._start_recording()
+        else:
+            self._stop_recording()
+
+    def _start_recording(self):
+        if not os.path.isfile(LABRECORDER_CLI):
+            self.rec_status.setText(f"ERROR: LabRecorderCLI not found at {LABRECORDER_CLI}")
+            self.rec_btn.setChecked(False)
+            return
+
+        # Build filename
+        name = self.rec_name.text().strip()
+        if not name:
+            name = time.strftime("%Y%m%d_%H%M%S")
+        if not name.endswith(".xdf"):
+            name += ".xdf"
+
+        os.makedirs(RECORDINGS_DIR, exist_ok=True)
+        filepath = os.path.join(RECORDINGS_DIR, name)
+
+        # LabRecorderCLI records all streams matching the predicate.
+        # 'type="BIO"' captures our sensor streams; use empty pred for ALL.
+        # Using a broad predicate to capture everything:
+        cmd = [LABRECORDER_CLI, filepath, "name='PolarH10_Sens'"]
+        # If there are more streams, capture all types:
+        # Build predicates for all currently discovered streams
+        preds = []
+        for key, st in self.streams.items():
+            preds.append(f"name='{st.name}'")
+
+        if not preds:
+            # Fallback: record anything
+            preds = ["type='BIO'"]
+
+        cmd = [LABRECORDER_CLI, filepath] + preds
+
+        try:
+            # CREATE_NEW_PROCESS_GROUP allows clean shutdown via CTRL_BREAK
+            self._rec_proc = subprocess.Popen(
+                cmd,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self._rec_file = filepath
+            self._rec_start_time = time.time()
+            self.rec_btn.setText("  STOP")
+            self.rec_name.setEnabled(False)
+            self.rec_status.setText(f"Recording to: {name}")
+            self.rec_status.setStyleSheet("font-size: 11px; color: #ff4444;")
+            print(f"[REC] Started: {' '.join(cmd)}")
+        except Exception as e:
+            self.rec_status.setText(f"ERROR: {e}")
+            self.rec_btn.setChecked(False)
+
+    def _stop_recording(self):
+        if self._rec_proc is not None:
+            try:
+                # Send CTRL_BREAK for graceful shutdown (writes XDF footer)
+                self._rec_proc.send_signal(signal.CTRL_BREAK_EVENT)
+                try:
+                    self._rec_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._rec_proc.kill()
+            except Exception as e:
+                print(f"[REC] Stop error: {e}")
+                try:
+                    self._rec_proc.kill()
+                except Exception:
+                    pass
+            self._rec_proc = None
+
+        elapsed = time.time() - self._rec_start_time if self._rec_start_time else 0
+        fname = os.path.basename(self._rec_file)
+        self.rec_btn.setText("  REC")
+        self.rec_name.setEnabled(True)
+        self.rec_status.setText(f"Saved: {fname} ({elapsed:.0f}s)")
+        self.rec_status.setStyleSheet("font-size: 11px; color: #44cc44;")
+        print(f"[REC] Stopped. File: {self._rec_file} ({elapsed:.1f}s)")
+
     # ── CSV diagnostic ───────────────────────────────────────────────────
 
     def _dump_csv(self, skey: str, t_min: float):
@@ -747,6 +861,8 @@ class Viewer(QtWidgets.QMainWindow):
 
     def closeEvent(self, ev):
         self._timer.stop(); self._disco_timer.stop()
+        if self._rec_proc is not None:
+            self._stop_recording()
         for r in self.readers: r.stop()
         for r in self.readers: r.join(timeout=2)
         super().closeEvent(ev)

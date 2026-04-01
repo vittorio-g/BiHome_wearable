@@ -18,3 +18,20 @@ all_sensors/**/secrets.h
 
 # CSV generati (riproducibili dallo script import pyxdf.py)
 data/csv_export/
+
+# Viewer recordings (XDF files, potentially large)
+Viewer/recordings/*.xdf
+
+# Viewer diagnostics
+Viewer/diag/
+
+# LabRecorder binaries (too large for git, download separately)
+LabRecorder/*.exe
+LabRecorder/*.dll
+LabRecorder/*.lib
+LabRecorder/iconengines/
+LabRecorder/imageformats/
+LabRecorder/networkinformation/
+LabRecorder/platforms/
+LabRecorder/styles/
+LabRecorder/tls/
