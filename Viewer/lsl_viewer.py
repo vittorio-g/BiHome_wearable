@@ -3,15 +3,17 @@ BiHome LSL Viewer – timestamp-faithful multi-stream viewer.
 
 Displays all discovered LSL streams using the *LSL timestamps* on the X-axis.
 Features: auto-discovery, per-channel visibility, per-stream toggle, scrolling
-time axis, per-channel Y-scale (auto/manual), live delay estimate, CSV diagnostics.
+time axis, per-channel Y-scale (auto/manual), live delay estimate, CSV diagnostics,
+BPM and HRV computation from beat channel, beat markers on ECG.
 
     pip install pylsl pyqtgraph PyQt5 numpy
 """
 from __future__ import annotations
 
 import os, sys, time, threading
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pylsl
@@ -21,11 +23,12 @@ import pyqtgraph as pg
 # ── constants ────────────────────────────────────────────────────────────────
 MAX_BUF = 50_000          # ~6 min @ 130 Hz
 WIN_S = 10.0
-REFRESH_MS = 250          # 4 FPS – plenty for monitoring, keeps UI responsive
+REFRESH_MS = 50           # 20 FPS – smooth scrolling
 RESOLVE_S = 1.0
 PULL_CHUNK = 1024
 REDISCOVER_S = 5.0
 SNAPSHOT_TAIL = 5000      # max samples processed per snapshot (~38s @ 130 Hz)
+Y_AXIS_WIDTH = 80         # fixed pixel width for left Y-axis labels (alignment)
 COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -109,7 +112,6 @@ class RingBuffer:
         ts, vs = ts[mask], vs[mask]
 
         # insert NaN at data gaps → breaks horizontal lines
-        # (connect="finite" in the plot will skip these NaN segments)
         if len(ts) > 1 and self.srate > 0:
             gap_thresh = 3.0 / self.srate
             dt = np.diff(ts)
@@ -120,6 +122,26 @@ class RingBuffer:
                 vs = np.insert(vs, ins, np.nan)
 
         return ts, vs
+
+    def raw_snapshot(self, t_min: float):
+        """Return raw (ts, vs) without gap insertion — for beat extraction."""
+        with self.lock:
+            n = self._count
+            if n == 0:
+                return np.empty(0), np.empty(0)
+            take = min(n, SNAPSHOT_TAIL)
+            start = (self._head - take) % MAX_BUF
+            if start + take <= MAX_BUF:
+                ts = self._ts[start:start + take].copy()
+                vs = self._vs[start:start + take].copy()
+            else:
+                p1 = MAX_BUF - start
+                ts = np.concatenate((self._ts[start:], self._ts[:take - p1]))
+                vs = np.concatenate((self._vs[start:], self._vs[:take - p1]))
+        idx = np.argsort(ts, kind="mergesort")
+        ts, vs = ts[idx], vs[idx]
+        mask = ts >= t_min
+        return ts[mask], vs[mask]
 
 
 # ── stream state ─────────────────────────────────────────────────────────────
@@ -164,9 +186,8 @@ class Reader(threading.Thread):
             self.st.latest_ts = timestamps[-1]
             self.st.delay = now - timestamps[-1]
 
-            # batch append: one lock acquisition per chunk per channel
             ts_np = np.array(timestamps, dtype=np.float64)
-            smp_np = np.array(samples, dtype=np.float64)  # shape (nsamp, nch)
+            smp_np = np.array(samples, dtype=np.float64)
             for ci in range(nch):
                 self.st.bufs[ci].append_batch(ts_np, smp_np[:, ci])
 
@@ -223,6 +244,7 @@ class ChRow:
     curve: object = None
     plot: object = None
     color: str = ""
+    beat_scatter: object = None   # scatter plot for beat markers on ECG
 
 
 # ── main window ──────────────────────────────────────────────────────────────
@@ -245,6 +267,12 @@ class Viewer(QtWidgets.QMainWindow):
 
         self._diag_done: set = set()
         self._diag_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diag")
+
+        # BPM / HRV state
+        self._beat_times: deque = deque(maxlen=200)  # recent beat timestamps
+        self._bpm = 0.0
+        self._hrv_sdnn = 0.0
+        self._hrv_rmssd = 0.0
 
         self._build_ui()
         self._new_streams.connect(self._on_new_streams)
@@ -290,6 +318,18 @@ class Viewer(QtWidgets.QMainWindow):
         self.delay_lbl = QtWidgets.QLabel("Delays: --")
         self.delay_lbl.setWordWrap(True)
         sl.addWidget(self.delay_lbl)
+
+        # BPM / HRV display
+        sl.addWidget(self._hline())
+        self.hr_lbl = QtWidgets.QLabel("")
+        self.hr_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #ff4444;")
+        self.hr_lbl.setWordWrap(True)
+        sl.addWidget(self.hr_lbl)
+        self.hrv_lbl = QtWidgets.QLabel("")
+        self.hrv_lbl.setStyleSheet("font-size: 13px; color: #aaaaaa;")
+        self.hrv_lbl.setWordWrap(True)
+        sl.addWidget(self.hrv_lbl)
+
         sl.addWidget(self._hline())
 
         scr = QtWidgets.QScrollArea(); scr.setWidgetResizable(True)
@@ -419,17 +459,83 @@ class Viewer(QtWidgets.QMainWindow):
         ri = 0
         for cr in self.rows:
             if not cr.cb.isChecked():
-                cr.curve = cr.plot = None; continue
+                cr.curve = cr.plot = None; cr.beat_scatter = None; continue
             p = self.pw.addPlot(row=ri, col=0); ri += 1
             p.setLabel("left", cr.label)
             p.setLabel("bottom", "time (s)")
             p.showGrid(x=True, y=True, alpha=0.3)
             p.enableAutoRange(axis='y')
             p.disableAutoRange(axis='x')
+            # Fix alignment: set fixed width for left axis
+            p.getAxis('left').setWidth(Y_AXIS_WIDTH)
             pen = pg.mkPen(color=cr.color, width=1)
             cr.curve = p.plot(pen=pen, connect="finite")
+            # Add beat scatter for ECG channels
+            if cr.label.lower().endswith("/ecg"):
+                cr.beat_scatter = pg.ScatterPlotItem(
+                    pen=None, brush=pg.mkBrush(255, 60, 60, 200),
+                    size=8, symbol='o')
+                p.addItem(cr.beat_scatter)
+            else:
+                cr.beat_scatter = None
             cr.plot = p
         self._prev_vis = [r.cb.isChecked() for r in self.rows]
+
+    # ── BPM / HRV ───────────────────────────────────────────────────────
+
+    def _find_beat_channel(self) -> Optional[Tuple[str, int]]:
+        """Find the beat channel (skey, ch_index) in streams."""
+        for key, st in self.streams.items():
+            for ci, cl in enumerate(st.ch_labels):
+                if cl.lower() == "beat":
+                    return key, ci
+        return None
+
+    def _update_hr(self, t_min: float):
+        """Extract beat timestamps from the beat channel and compute BPM/HRV."""
+        bc = self._find_beat_channel()
+        if bc is None:
+            return
+        skey, ci = bc
+        buf = self.streams[skey].bufs[ci]
+        ts, vs = buf.raw_snapshot(t_min)
+        if len(ts) < 2:
+            return
+
+        # Find samples where beat == 1.0
+        beat_mask = vs > 0.5
+        beat_ts = ts[beat_mask]
+
+        if len(beat_ts) < 2:
+            return
+
+        # Update beat_times deque with new beats
+        # Only add beats newer than what we have
+        last_known = self._beat_times[-1] if self._beat_times else 0.0
+        for bt in beat_ts:
+            if bt > last_known:
+                self._beat_times.append(bt)
+                last_known = bt
+
+        # Compute from recent beats (last 30s)
+        now_ts = beat_ts[-1]
+        recent = [t for t in self._beat_times if t > now_ts - 30.0]
+        if len(recent) < 3:
+            return
+
+        rr = np.diff(recent)
+        # Filter physiological range
+        valid = rr[(rr >= 0.3) & (rr <= 1.8)]
+        if len(valid) < 2:
+            return
+
+        mean_rr = np.mean(valid)
+        self._bpm = 60.0 / mean_rr
+
+        # HRV metrics
+        self._hrv_sdnn = float(np.std(valid, ddof=1)) * 1000.0  # ms
+        diffs = np.diff(valid)
+        self._hrv_rmssd = float(np.sqrt(np.mean(diffs ** 2))) * 1000.0 if len(diffs) > 0 else 0.0
 
     # ── refresh ──────────────────────────────────────────────────────────
 
@@ -456,6 +562,29 @@ class Viewer(QtWidgets.QMainWindow):
         if cv != self._prev_vis:
             self._rebuild_plots(); return
 
+        # Compute BPM/HRV (uses beat channel)
+        t_min_hr = now - 60.0  # look back 60s for HR computation
+        self._update_hr(t_min_hr)
+        if self._bpm > 0:
+            self.hr_lbl.setText(f"HR: {self._bpm:.0f} bpm")
+            self.hrv_lbl.setText(
+                f"SDNN: {self._hrv_sdnn:.1f} ms  |  RMSSD: {self._hrv_rmssd:.1f} ms")
+        else:
+            self.hr_lbl.setText("HR: --")
+            self.hrv_lbl.setText("")
+
+        # Find beat channel for ECG overlay
+        bc = self._find_beat_channel()
+        beat_ts_arr = None
+        if bc is not None:
+            skey_beat, ci_beat = bc
+            t_end_beat = stream_tend.get(skey_beat, now)
+            beat_buf = self.streams[skey_beat].bufs[ci_beat]
+            bts, bvs = beat_buf.raw_snapshot(t_end_beat - win)
+            if len(bts) > 0:
+                beat_mask = bvs > 0.5
+                beat_ts_arr = bts[beat_mask]
+
         for cr in self.rows:
             if cr.curve is None or cr.plot is None:
                 continue
@@ -469,6 +598,8 @@ class Viewer(QtWidgets.QMainWindow):
             # all-NaN channel (e.g. ACC not running): show empty
             if len(ts) < 2 or np.all(np.isnan(vs)):
                 cr.curve.setData([], [])
+                if cr.beat_scatter:
+                    cr.beat_scatter.setData([], [])
                 continue
 
             # diagnostic CSV (once per stream)
@@ -480,6 +611,22 @@ class Viewer(QtWidgets.QMainWindow):
             xr = t_end - t_ref
             cr.curve.setData(x, vs)
             cr.plot.setXRange(xl, xr, padding=0)
+
+            # Beat markers on ECG plot
+            if cr.beat_scatter is not None and beat_ts_arr is not None and len(beat_ts_arr) > 0:
+                # Find ECG values at beat timestamps by nearest-neighbor lookup
+                # Use the raw (no-NaN) version for matching
+                raw_ts, raw_vs = buf.raw_snapshot(t_min)
+                if len(raw_ts) > 1:
+                    idxs = np.searchsorted(raw_ts, beat_ts_arr, side='left')
+                    idxs = np.clip(idxs, 0, len(raw_ts) - 1)
+                    bt_x = beat_ts_arr - t_ref
+                    bt_y = raw_vs[idxs]
+                    # Filter to visible window
+                    vis = (bt_x >= xl) & (bt_x <= xr)
+                    cr.beat_scatter.setData(bt_x[vis], bt_y[vis])
+                else:
+                    cr.beat_scatter.setData([], [])
 
             # Y range (nanmin/nanmax skip the gap NaN markers)
             if cr.ys.is_auto():

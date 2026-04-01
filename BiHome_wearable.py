@@ -41,7 +41,7 @@ ENABLE_SIGNAL_FILTER = True
 # When enabled, gaps in the Polar ECG stream are filled with a synthetic signal
 # built from the average beat template + estimated RR interval.
 # Only gaps ≤ IMPUTER_MAX_GAP_S are imputed; longer gaps pass through as NaN.
-ENABLE_ECG_IMPUTATION  = True
+ENABLE_ECG_IMPUTATION  = False   # Not needed with direct BLE (0% loss)
 IMPUTER_MAX_GAP_S      = 4.0   # seconds — skip imputation for longer dropouts
 
 # =====================================================
@@ -547,6 +547,11 @@ class PolarECGImputer:
         self._gap_start_ts: Optional[float] = None
         self._last_beat_output_ts: Optional[float] = None  # wall-clock guard for output
 
+        # Output delay queue: holds samples for POST_S seconds so beat markers
+        # can be retroactively placed on the exact R-peak sample.
+        from collections import deque
+        self._delay_q: 'deque[List]' = deque()  # each entry: [ts, val, is_beat]
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -554,63 +559,105 @@ class PolarECGImputer:
     def push(self, ts: float, val: float) -> List[Tuple[float, float, bool]]:
         """Feed one sample (ts in device-seconds, val in µV or NaN).
 
-        Returns a list of (ts, ecg_val, is_beat) triples:
-          - Normal:    [(ts, val, is_beat)]      is_beat=True when R-peak confirmed
-          - Gap start: []                        NaN samples silently consumed
-          - Gap end:   [(imp_ts, imp_val, is_beat), ..., (ts, val, is_beat)]
+        Returns a list of (ts, ecg_val, is_beat) triples.  Output is delayed by
+        POST_S (~0.4 s) so that beat markers land on the exact R-peak sample
+        rather than being offset by the detection latency.
 
-        NOTE: R-peak detection is delayed by POST_S (~0.4 s) because it waits for
-        the post-peak window to complete before confirming.  When is_beat=True on
-        a real sample at time T, the actual peak occurred at approximately T-POST_S.
-        Imputed beats (from gap filling) are marked at their exact predicted position.
+        Imputed samples (gap fill) are returned immediately with their own
+        predicted beat positions.
         """
         import math
+        out: List[Tuple[float, float, bool]] = []
+
         if math.isnan(val):
             if not self._in_gap:
                 self._in_gap       = True
                 self._gap_start_ts = ts
-            return []
+            # Flush delay queue on gap start (no more samples coming to confirm)
+            while self._delay_q:
+                e = self._delay_q.popleft()
+                out.append(self._guard_beat(e[0], e[1], e[2]))
+            return out
 
-        imputed: List[Tuple[float, float, bool]] = []
+        # Gap end → impute if enabled
         if self._in_gap and self._gap_start_ts is not None:
             gap_dur = ts - self._gap_start_ts
             if 0.0 < gap_dur <= self._max_gap:
                 imputed = self._fill(self._gap_start_ts, ts)
+                for imp in imputed:
+                    out.append(self._guard_beat(*imp))
             self._in_gap       = False
             self._gap_start_ts = None
 
+        # Run detection (updates _last_peak_ts if peak confirmed)
         prev_peak = self._last_peak_ts
         self._ingest(ts, val)
-        is_beat = (self._last_peak_ts is not None and self._last_peak_ts != prev_peak)
+        new_beat_ts = None
+        if self._last_peak_ts is not None and self._last_peak_ts != prev_peak:
+            new_beat_ts = self._last_peak_ts  # actual peak timestamp
 
-        # Gap prediction: if no beat detected for > 1.8 × mean RR, advance the
-        # expected beat position and mark this sample as a predicted beat.
-        # Accounts for POST_S delay when estimating elapsed time.
-        if (not is_beat
+        # If a new beat was confirmed, retroactively mark the correct sample
+        # in the delay queue
+        if new_beat_ts is not None:
+            best_idx = -1
+            best_dt = float('inf')
+            for i, e in enumerate(self._delay_q):
+                dt = abs(e[0] - new_beat_ts)
+                if dt < best_dt:
+                    best_dt = dt
+                    best_idx = i
+            if best_idx >= 0:
+                self._delay_q[best_idx][2] = True
+
+        # Gap prediction: if no beat detected for > 1.8 × mean RR
+        if (new_beat_ts is None
                 and self._last_peak_ts is not None
                 and len(self._rr_hist) >= 2):
             rr = self._rr_estimate()
-            elapsed = (ts - self.POST_S) - self._last_peak_ts
+            elapsed = ts - self._last_peak_ts
             if elapsed > 1.8 * rr:
-                self._last_peak_ts = self._last_peak_ts + rr
-                is_beat = True
+                pred_ts = self._last_peak_ts + rr
+                self._last_peak_ts = pred_ts
+                # Mark predicted beat in delay queue if possible
+                best_idx = -1
+                best_dt = float('inf')
+                for i, e in enumerate(self._delay_q):
+                    dt = abs(e[0] - pred_ts)
+                    if dt < best_dt:
+                        best_dt = dt
+                        best_idx = i
+                if best_idx >= 0:
+                    self._delay_q[best_idx][2] = True
 
-        # Output guard: never emit two is_beat=True events within MIN_RR_S of each
-        # other in stream time.  This catches the gap-prediction + real-detection
-        # double: both fire within ~50 ms even though the underlying beats are ~RR apart.
-        results = imputed + [(ts, val, is_beat)]
-        filtered = []
-        for (evt_ts, evt_val, evt_beat) in results:
-            if evt_beat:
-                if (self._last_beat_output_ts is None
-                        or evt_ts - self._last_beat_output_ts >= self.MIN_RR_S):
-                    self._last_beat_output_ts = evt_ts
-                    filtered.append((evt_ts, evt_val, True))
-                else:
-                    filtered.append((evt_ts, evt_val, False))  # suppress double
+        # Enqueue current sample (initially beat=False)
+        self._delay_q.append([ts, val, False])
+
+        # Release samples older than POST_S from the delay queue
+        cutoff = ts - self.POST_S
+        while self._delay_q and self._delay_q[0][0] <= cutoff:
+            e = self._delay_q.popleft()
+            out.append(self._guard_beat(e[0], e[1], e[2]))
+
+        return out
+
+    def flush(self) -> List[Tuple[float, float, bool]]:
+        """Flush remaining samples from the delay queue (call at end of stream)."""
+        out = []
+        while self._delay_q:
+            e = self._delay_q.popleft()
+            out.append(self._guard_beat(e[0], e[1], e[2]))
+        return out
+
+    def _guard_beat(self, ts: float, val: float, is_beat: bool) -> Tuple[float, float, bool]:
+        """Output guard: suppress beat if too close to previous."""
+        if is_beat:
+            if (self._last_beat_output_ts is None
+                    or ts - self._last_beat_output_ts >= self.MIN_RR_S):
+                self._last_beat_output_ts = ts
+                return (ts, val, True)
             else:
-                filtered.append((evt_ts, evt_val, False))
-        return filtered
+                return (ts, val, False)
+        return (ts, val, False)
 
     def has_template(self) -> bool:
         return self._template is not None and len(self._rr_hist) >= 2
@@ -1411,8 +1458,10 @@ class BleakPolarThread(threading.Thread):
         self._polar_off_s = 0.0  # offset such that ts_host = ts_polar_s + offset
         self._ALPHA = 0.05  # slower EMA — Polar clock is very stable
 
-        # ACC state: hold last known values
-        self._last_acc = [float('nan'), float('nan'), float('nan')]
+        # ACC state: timestamped ring for linear interpolation
+        # Each entry: (host_ts, ax, ay, az)
+        self._acc_ring: List[Tuple[float, float, float, float]] = []
+        self._ACC_RING_MAX = 200  # ~4s at 50Hz
 
         # Stats
         self._ecg_count = 0
@@ -1472,7 +1521,8 @@ class BleakPolarThread(threading.Thread):
                     beat_val = 1.0 if is_beat else 0.0
                     is_real = (j == len(raw_out) - 1)
                     if is_real:
-                        vals = [imp_ecg] + list(self._last_acc) + [beat_val]
+                        acc = self._interp_acc(imp_ts)
+                        vals = [imp_ecg] + acc + [beat_val]
                     else:
                         vals = [imp_ecg, float('nan'), float('nan'), float('nan'), beat_val]
 
@@ -1484,7 +1534,8 @@ class BleakPolarThread(threading.Thread):
                     except Exception as e:
                         log("[BleakPolar]", f"LSL push error: {e}")
             else:
-                vals = [ecg_uv] + list(self._last_acc) + [0.0]
+                acc = self._interp_acc(ts_host)
+                vals = [ecg_uv] + acc + [0.0]
                 if filt:
                     vals = [filt.apply(vals[0])] + vals[1:]
                 try:
@@ -1502,18 +1553,57 @@ class BleakPolarThread(threading.Thread):
             log("[BleakPolar]", f"First ECG data -> LSL '{sname}' ({nsamp} samples)")
             self._printed_first[lbl] = True
 
+    def _interp_acc(self, ts_host: float) -> List[float]:
+        """Linearly interpolate ACC at an ECG timestamp from the ACC ring."""
+        ring = self._acc_ring
+        if not ring:
+            return [float('nan')] * 3
+        if len(ring) == 1 or ts_host <= ring[0][0]:
+            return [ring[0][1], ring[0][2], ring[0][3]]
+        if ts_host >= ring[-1][0]:
+            return [ring[-1][1], ring[-1][2], ring[-1][3]]
+        # Binary search for bracket
+        lo, hi = 0, len(ring) - 1
+        while lo < hi - 1:
+            mid = (lo + hi) // 2
+            if ring[mid][0] <= ts_host:
+                lo = mid
+            else:
+                hi = mid
+        t0, ax0, ay0, az0 = ring[lo]
+        t1, ax1, ay1, az1 = ring[hi]
+        dt = t1 - t0
+        if dt < 1e-9:
+            return [ax1, ay1, az1]
+        f = (ts_host - t0) / dt
+        return [ax0 + f * (ax1 - ax0),
+                ay0 + f * (ay1 - ay0),
+                az0 + f * (az1 - az0)]
+
     def _push_acc_batch(self, payload: bytes, polar_ts_ns: int):
-        """Decode ACC samples and update last-known ACC values."""
+        """Decode ACC samples and store with timestamps for interpolation."""
         step = 6  # 3 × int16
         nsamp = len(payload) // step
         if nsamp <= 0:
             return
-        # Keep only last sample (ACC is merged with ECG in output)
-        last = payload[(nsamp-1)*step : nsamp*step]
-        ax = int.from_bytes(last[0:2], 'little', signed=True)
-        ay = int.from_bytes(last[2:4], 'little', signed=True)
-        az = int.from_bytes(last[4:6], 'little', signed=True)
-        self._last_acc = [float(ax), float(ay), float(az)]
+
+        self._update_clock(polar_ts_ns)
+        ACC_RATE = 50.0
+        first_ns = polar_ts_ns - (nsamp - 1) * int(1e9 / ACC_RATE)
+
+        for i in range(nsamp):
+            off = i * step
+            ax = int.from_bytes(payload[off:off+2], 'little', signed=True)
+            ay = int.from_bytes(payload[off+2:off+4], 'little', signed=True)
+            az = int.from_bytes(payload[off+4:off+6], 'little', signed=True)
+            ts_ns = first_ns + i * int(1e9 / ACC_RATE)
+            ts_host = self._polar_to_host(ts_ns)
+            self._acc_ring.append((ts_host, float(ax), float(ay), float(az)))
+
+        # Trim ring
+        if len(self._acc_ring) > self._ACC_RING_MAX:
+            self._acc_ring = self._acc_ring[-self._ACC_RING_MAX:]
+
         self._acc_count += nsamp
 
     def _handle_pmd(self, sender, data: bytearray):
