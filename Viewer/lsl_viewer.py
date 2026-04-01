@@ -236,9 +236,10 @@ class YScaleWidget(QtWidgets.QWidget):
         QDoubleSpinBox {{
             background: {BG_INPUT}; color: {TEXT_DIM};
             border: 1px solid {BORDER}; border-radius: 3px;
-            padding: 1px 4px; font-size: 10px; max-width: 70px;
+            padding: 2px 2px; font-size: 10px;
+            min-width: 56px; max-width: 68px;
         }}
-        QDoubleSpinBox:disabled {{ color: {BORDER}; }}
+        QDoubleSpinBox:disabled {{ color: {BORDER}; background: transparent; border-color: transparent; }}
         QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
             background: {BG_CARD}; border: none; width: 12px;
         }}
@@ -247,20 +248,24 @@ class YScaleWidget(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(3)
-        self.auto_cb = QtWidgets.QCheckBox("A")
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(4)
+        self.auto_cb = QtWidgets.QCheckBox()
         self.auto_cb.setToolTip("Auto Y-scale")
         self.auto_cb.setChecked(True)
-        self.auto_cb.setStyleSheet(f"QCheckBox {{ color: {TEXT_DIM}; font-size: 10px; }}")
+        self.auto_cb.setFixedWidth(32)
+        self.auto_cb.setStyleSheet(f"""
+            QCheckBox {{ spacing: 0px; }}
+            QCheckBox::indicator {{ width: 16px; height: 16px; }}
+        """)
         self.auto_cb.toggled.connect(self._toggle)
         lay.addWidget(self.auto_cb)
         self.mn = QtWidgets.QDoubleSpinBox(); self.mn.setRange(-1e9, 1e9)
-        self.mn.setDecimals(1); self.mn.setPrefix("min "); self.mn.setValue(-1)
+        self.mn.setDecimals(1); self.mn.setValue(-1)
         self.mn.setEnabled(False); self.mn.valueChanged.connect(self.changed)
         self.mn.setStyleSheet(self._SPIN_STYLE)
         lay.addWidget(self.mn)
         self.mx = QtWidgets.QDoubleSpinBox(); self.mx.setRange(-1e9, 1e9)
-        self.mx.setDecimals(1); self.mx.setPrefix("max "); self.mx.setValue(1)
+        self.mx.setDecimals(1); self.mx.setValue(1)
         self.mx.setEnabled(False); self.mx.valueChanged.connect(self.changed)
         self.mx.setStyleSheet(self._SPIN_STYLE)
         lay.addWidget(self.mx)
@@ -610,9 +615,7 @@ class Viewer(QtWidgets.QMainWindow):
     def _add_stream_ui(self, key: str, st: StreamState):
         # Stream header card
         hw = QtWidgets.QWidget()
-        hw.setStyleSheet(f"""
-            QWidget {{ background: {BG_CARD}; border-radius: 6px; }}
-        """)
+        hw.setStyleSheet(f"QWidget {{ background: {BG_CARD}; border-radius: 6px; }}")
         hl = QtWidgets.QHBoxLayout(hw)
         hl.setContentsMargins(10, 6, 10, 6)
         lbl = QtWidgets.QLabel(
@@ -633,25 +636,88 @@ class Viewer(QtWidgets.QMainWindow):
         self._stream_rec_cbs[key] = rec_cb
         self.ch_lay.addWidget(hw)
 
-        # Channel rows
+        # Column headers
+        hdr = QtWidgets.QWidget()
+        hdr_l = QtWidgets.QHBoxLayout(hdr)
+        hdr_l.setContentsMargins(4, 2, 4, 0); hdr_l.setSpacing(4)
+        hdr_ch = QtWidgets.QLabel("channel")
+        hdr_ch.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
+        hdr_ch.setMinimumWidth(90)
+        hdr_l.addWidget(hdr_ch)
+        for h in ("auto", "min", "max"):
+            hl2 = QtWidgets.QLabel(h)
+            hl2.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
+            hl2.setAlignment(QtCore.Qt.AlignCenter)
+            if h == "auto":
+                hl2.setFixedWidth(32)
+            else:
+                hl2.setMinimumWidth(62)
+            hdr_l.addWidget(hl2)
+        hdr_l.addStretch()
+        self.ch_lay.addWidget(hdr)
+
+        # Channel rows — colored toggle button + aligned auto/min/max
         cbs: List[QtWidgets.QCheckBox] = []
+        ch_btns: List[QtWidgets.QPushButton] = []
         for ci, cl in enumerate(st.ch_labels):
             rw = QtWidgets.QWidget()
             rl = QtWidgets.QHBoxLayout(rw)
-            rl.setContentsMargins(14, 1, 4, 1); rl.setSpacing(6)
+            rl.setContentsMargins(4, 1, 4, 1); rl.setSpacing(4)
             color = COLORS[self._color_idx % len(COLORS)]; self._color_idx += 1
-            dot = QtWidgets.QLabel("\u25cf")
-            dot.setStyleSheet(f"color:{color}; font-size:10px;")
-            dot.setFixedWidth(14)
-            cb = QtWidgets.QCheckBox(cl); cb.setChecked(True)
-            cb.setStyleSheet(f"QCheckBox {{ color: {TEXT_PRIMARY}; font-size: 12px; }}")
+
+            # Toggle button: colored when active, gray when off
+            btn = QtWidgets.QPushButton(cl)
+            btn.setCheckable(True)
+            btn.setChecked(True)
+            btn.setMinimumWidth(90)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {color}; color: #ffffff;
+                    border: none; border-radius: 4px;
+                    padding: 4px 10px; font-size: 11px; font-weight: 600;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    background: {color}; opacity: 0.85;
+                    border: 1px solid rgba(255,255,255,0.3);
+                }}
+                QPushButton:!checked {{
+                    background: {BG_INPUT}; color: {GRAY};
+                    border: 1px solid {BORDER};
+                }}
+                QPushButton:!checked:hover {{
+                    border-color: {color}; color: {color};
+                }}
+            """)
+            # We use a hidden QCheckBox for compatibility with existing code
+            cb = QtWidgets.QCheckBox()
+            cb.setChecked(True)
+            cb.setVisible(False)
+            btn.toggled.connect(cb.setChecked)
+            cb.toggled.connect(btn.setChecked)
+            rl.addWidget(btn)
+            ch_btns.append(btn)
+
             ys = YScaleWidget()
-            rl.addWidget(dot); rl.addWidget(cb); rl.addWidget(ys, stretch=1)
+            rl.addWidget(ys)
             self.ch_lay.addWidget(rw)
             self.rows.append(ChRow(skey=key, ci=ci,
                                    label=f"{st.name}/{cl}", cb=cb,
                                    ys=ys, color=color))
             cbs.append(cb)
+
+        # Make all channel buttons the same width (widest label)
+        QtCore.QTimer.singleShot(0, lambda btns=ch_btns: self._equalize_btn_widths(btns))
+
+    @staticmethod
+    def _equalize_btn_widths(btns):
+        """Set all buttons to the width of the widest one."""
+        if not btns:
+            return
+        max_w = max(b.sizeHint().width() for b in btns)
+        max_w = max(max_w, 80)
+        for b in btns:
+            b.setFixedWidth(max_w)
 
     # ── plot management ──────────────────────────────────────────────────
 
