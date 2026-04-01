@@ -10,7 +10,7 @@ BPM and HRV computation from beat channel, beat markers on ECG.
 """
 from __future__ import annotations
 
-import os, sys, time, threading, subprocess, signal
+import os, sys, time, json, threading, subprocess, signal
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -38,6 +38,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _REC_DIR = os.path.join(os.path.dirname(_HERE), "LabRecorder")
 LABRECORDER_CLI = os.path.join(_REC_DIR, "LabRecorderCLI.exe")
 RECORDINGS_DIR = os.path.join(_HERE, "recordings")
+SETTINGS_FILE = os.path.join(_HERE, "viewer_settings.json")
 COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -284,6 +285,7 @@ class Viewer(QtWidgets.QMainWindow):
         self._hrv_rmssd = 0.0
 
         self._build_ui()
+        self._load_settings()
         self._new_streams.connect(self._on_new_streams)
 
         self._resolver_pending: List[StreamState] = []
@@ -460,6 +462,7 @@ class Viewer(QtWidgets.QMainWindow):
             added = True
 
         if added:
+            self._apply_stream_settings()
             self._rebuild_plots()
 
     def _add_stream_ui(self, key: str, st: StreamState):
@@ -953,10 +956,110 @@ class Viewer(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"[DIAG] err: {e}")
 
+    # ── settings persistence ────────────────────────────────────────────
+
+    def _save_settings(self):
+        """Save current UI state to JSON."""
+        # Channel visibility: map label → checked
+        ch_vis = {}
+        for cr in self.rows:
+            ch_vis[cr.label] = cr.cb.isChecked()
+
+        # Y-scale per channel
+        ch_yscale = {}
+        for cr in self.rows:
+            if cr.ys.is_auto():
+                ch_yscale[cr.label] = {"auto": True}
+            else:
+                a, b = cr.ys.manual()
+                ch_yscale[cr.label] = {"auto": False, "min": a, "max": b}
+
+        # Stream REC checkboxes
+        stream_rec = {}
+        for key, cb in self._stream_rec_cbs.items():
+            # Use stream name as key (more stable than full key with source_id)
+            st = self.streams.get(key)
+            if st:
+                stream_rec[st.name] = cb.isChecked()
+
+        settings = {
+            "window_s": self.win_spin.value(),
+            "window_geometry": {
+                "x": self.x(), "y": self.y(),
+                "w": self.width(), "h": self.height(),
+            },
+            "channel_visibility": ch_vis,
+            "channel_yscale": ch_yscale,
+            "stream_rec": stream_rec,
+        }
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(settings, f, indent=2)
+            print(f"[Settings] Saved to {SETTINGS_FILE}")
+        except Exception as e:
+            print(f"[Settings] Save error: {e}")
+
+    def _load_settings(self):
+        """Load saved settings and apply to UI."""
+        if not os.path.isfile(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE) as f:
+                s = json.load(f)
+        except Exception as e:
+            print(f"[Settings] Load error: {e}")
+            return
+
+        # Window size
+        if "window_s" in s:
+            self.win_spin.setValue(s["window_s"])
+
+        # Window geometry
+        geo = s.get("window_geometry")
+        if geo:
+            self.setGeometry(geo.get("x", 100), geo.get("y", 100),
+                             geo.get("w", 1400), geo.get("h", 800))
+
+        print(f"[Settings] Loaded from {SETTINGS_FILE}")
+
+    def _apply_stream_settings(self):
+        """Apply per-stream/channel settings after streams are discovered."""
+        if not os.path.isfile(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE) as f:
+                s = json.load(f)
+        except Exception:
+            return
+
+        # Channel visibility
+        ch_vis = s.get("channel_visibility", {})
+        for cr in self.rows:
+            if cr.label in ch_vis:
+                cr.cb.setChecked(ch_vis[cr.label])
+
+        # Y-scale
+        ch_ys = s.get("channel_yscale", {})
+        for cr in self.rows:
+            if cr.label in ch_ys:
+                ys_cfg = ch_ys[cr.label]
+                cr.ys.auto_cb.setChecked(ys_cfg.get("auto", True))
+                if not ys_cfg.get("auto", True):
+                    cr.ys.mn.setValue(ys_cfg.get("min", -1))
+                    cr.ys.mx.setValue(ys_cfg.get("max", 1))
+
+        # Stream REC checkboxes
+        stream_rec = s.get("stream_rec", {})
+        for key, cb in self._stream_rec_cbs.items():
+            st = self.streams.get(key)
+            if st and st.name in stream_rec:
+                cb.setChecked(stream_rec[st.name])
+
     # ── cleanup ──────────────────────────────────────────────────────────
 
     def closeEvent(self, ev):
         self._timer.stop(); self._disco_timer.stop()
+        self._save_settings()
         if self._rec_proc is not None:
             self._stop_recording()
         for r in self.readers: r.stop()
