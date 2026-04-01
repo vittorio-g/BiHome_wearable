@@ -629,8 +629,8 @@ class Viewer(QtWidgets.QMainWindow):
                 self._cached_data[ri] = (ts, vs)  # store absolute timestamps
 
                 # Beat markers for ECG: beat=1.0 appears ~0.4s AFTER the
-                # actual R-peak.  For each beat event, find the local max
-                # in ECG within [beat_ts - 0.5s, beat_ts] and place the dot there.
+                # actual R-peak.  For each beat event, find the positive
+                # maximum in ECG within [beat_ts - 0.5s, beat_ts].
                 if cr.beat_scatter is not None:
                     bc = self._find_beat_channel()
                     if bc is not None:
@@ -638,7 +638,6 @@ class Viewer(QtWidgets.QMainWindow):
                         if skey_beat == cr.skey:
                             ecg_buf = self.streams[skey_beat].bufs[cr.ci]
                             beat_buf = self.streams[skey_beat].bufs[ci_beat]
-                            # Get raw ECG data (wider window for lookback)
                             e_ts, e_vs = ecg_buf.raw_snapshot(t_min - 1.0)
                             b_ts, b_vs = beat_buf.raw_snapshot(t_min)
                             beat_mask = b_vs > 0.5
@@ -646,13 +645,13 @@ class Viewer(QtWidgets.QMainWindow):
                             if len(beat_times) > 0 and len(e_ts) > 10:
                                 dot_x, dot_y = [], []
                                 for bt in beat_times:
-                                    # Search ECG for max in [bt-0.5, bt]
+                                    # Search for the tallest positive peak
                                     win_mask = (e_ts >= bt - 0.5) & (e_ts <= bt)
                                     if not np.any(win_mask):
                                         continue
                                     win_vs = e_vs[win_mask]
                                     win_ts = e_ts[win_mask]
-                                    pk_idx = np.argmax(np.abs(win_vs))
+                                    pk_idx = int(np.argmax(win_vs))
                                     dot_x.append(win_ts[pk_idx] - t_ref)
                                     dot_y.append(win_vs[pk_idx])
                                 self._cached_beat_map[ri] = (
