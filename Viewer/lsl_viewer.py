@@ -670,16 +670,17 @@ class Viewer(QtWidgets.QMainWindow):
             btn.setCheckable(True)
             btn.setChecked(True)
             btn.setMinimumWidth(90)
+            # Convert hex color to rgba for transparent fill
+            r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {color}; color: #ffffff;
-                    border: none; border-radius: 4px;
+                    background: rgba({r},{g},{b},0.12); color: {color};
+                    border: 1.5px solid {color}; border-radius: 4px;
                     padding: 4px 10px; font-size: 11px; font-weight: 600;
                     text-align: left;
                 }}
                 QPushButton:hover {{
-                    background: {color}; opacity: 0.85;
-                    border: 1px solid rgba(255,255,255,0.3);
+                    background: rgba({r},{g},{b},0.22);
                 }}
                 QPushButton:!checked {{
                     background: {BG_INPUT}; color: {GRAY};
@@ -687,6 +688,7 @@ class Viewer(QtWidgets.QMainWindow):
                 }}
                 QPushButton:!checked:hover {{
                     border-color: {color}; color: {color};
+                    background: rgba({r},{g},{b},0.08);
                 }}
             """)
             # We use a hidden QCheckBox for compatibility with existing code
