@@ -12,12 +12,14 @@ FIXES:
 - nominal_srate set where known
 """
 
+import os
 import sys
 import time
 import struct
 import asyncio
 import socket
 import select
+import subprocess
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -60,13 +62,50 @@ POLAR_SERIAL_PORT = "COM5"
 POLAR_SERIAL_BAUD = 921600
 
 # --- Direct BLE to Polar H10 via bleak (PC Bluetooth) ---
-POLAR_BLE_ADDRESS = "24:AC:AC:04:96:A3"
+POLAR_BLE_ADDRESS = "24:AC:AC:04:96:A3"  # default for single-participant mode
 
 POLAR_LABEL_MAP = {
-    # 'beat' is the last channel: 0 normally, 1 when an R-peak is confirmed.
-    # It is computed in Python (not from firmware) — see PolarECGImputer.
     "Sens": ("PolarH10_Sens", ["ecg","ax","ay","az","beat"], 130.0),
 }
+
+# =====================================================
+# Known devices registry — friendly name → address/serial
+# =====================================================
+
+KNOWN_POLAR = {
+    "Fascia A": "24:AC:AC:04:96:A3",
+    # "Fascia B": "XX:XX:XX:XX:XX:XX",
+}
+
+KNOWN_EMOTIBIT = {
+    # "EmotiBit Rosso": "serial_number_here",
+}
+
+# =====================================================
+# Multi-participant helpers
+# =====================================================
+
+def make_polar_label_map(participant_id: str) -> dict:
+    """Generate Polar label_map with participant prefix in stream names."""
+    prefix = f"{participant_id}_"
+    return {
+        "Sens": (f"{prefix}PolarH10_Sens", ["ecg", "ax", "ay", "az", "beat"], 130.0),
+    }
+
+def make_emotibit_stream_names(participant_id: str) -> dict:
+    """Generate EmotiBit stream/source names with participant prefix."""
+    prefix = f"{participant_id}_"
+    pid = participant_id.lower()
+    return {
+        "imu_name": f"{prefix}EmotiBit_IMU",
+        "ppg_name": f"{prefix}EmotiBit_PPG",
+        "eda_temp_name": f"{prefix}EmotiBit_EDA_TEMP",
+        "clock_name": f"Clock_{prefix}EmotiBit",
+        "imu_sid": f"emotibit_imu_{pid}",
+        "ppg_sid": f"emotibit_ppg_{pid}",
+        "eda_temp_sid": f"emotibit_eda_temp_{pid}",
+        "clock_sid": f"clock_emotibit_{pid}",
+    }
 
 # --- Sync cadence (seconds) ---
 SYNC_INTERVAL_S = 2.0
@@ -1700,41 +1739,55 @@ class BleakPolarThread(threading.Thread):
 # =====================================================
 
 class EmotiBitThread(threading.Thread):
-    def __init__(self, health: DeviceHealth):
+    def __init__(self, health: DeviceHealth, participant_id: str = "",
+                 serial_number: str = ""):
         super().__init__(daemon=True)
         self.health = health
+        self.participant_id = participant_id
+        self._serial_number = serial_number
+
+        # Stream names: prefixed with participant ID if provided
+        if participant_id:
+            sn = make_emotibit_stream_names(participant_id)
+        else:
+            sn = {
+                "imu_name": "EmotiBit_IMU", "ppg_name": "EmotiBit_PPG",
+                "eda_temp_name": "EmotiBit_EDA_TEMP", "clock_name": "Clock_EmotiBit",
+                "imu_sid": "emotibit_imu", "ppg_sid": "emotibit_ppg",
+                "eda_temp_sid": "emotibit_eda_temp", "clock_sid": "clock_emotibit",
+            }
 
         self.out_imu = make_lsl_outlet(
-            stream_name="EmotiBit_IMU",
+            stream_name=sn["imu_name"],
             stream_type="BIO",
             channel_labels=["acc_x","acc_y","acc_z","gyro_x","gyro_y","gyro_z","mag_x","mag_y","mag_z"],
             nominal_srate=0.0,
-            source_id="emotibit_imu",
+            source_id=sn["imu_sid"],
         )
         self.out_ppg = make_lsl_outlet(
-            stream_name="EmotiBit_PPG",
+            stream_name=sn["ppg_name"],
             stream_type="BIO",
             channel_labels=["ppg_0","ppg_1","ppg_2"],
             nominal_srate=0.0,
-            source_id="emotibit_ppg",
+            source_id=sn["ppg_sid"],
         )
         self.out_eda_temp = make_lsl_outlet(
-            stream_name="EmotiBit_EDA_TEMP",
+            stream_name=sn["eda_temp_name"],
             stream_type="BIO",
             channel_labels=["eda","temp"],
             nominal_srate=0.0,
-            source_id="emotibit_eda_temp",
+            source_id=sn["eda_temp_sid"],
         )
 
         self.clock_outlet: Optional[StreamOutlet] = None
         if EMOTIBIT_CLOCK_STREAM:
             info = StreamInfo(
-                name="Clock_EmotiBit",
+                name=sn["clock_name"],
                 type="CLOCK",
                 channel_count=4,
                 nominal_srate=0.0,
                 channel_format="float32",
-                source_id="clock_emotibit",
+                source_id=sn["clock_sid"],
             )
             try:
                 chns = info.desc().append_child("channels")
@@ -1875,8 +1928,10 @@ class EmotiBitThread(threading.Thread):
             params = BrainFlowInputParams()
             if EMOTIBIT_IP:
                 params.ip_address = str(EMOTIBIT_IP)
-            if EMOTIBIT_SERIAL_NUMBER:
-                params.serial_number = str(EMOTIBIT_SERIAL_NUMBER)
+            # Prefer instance serial number, fall back to global config
+            sn = self._serial_number or EMOTIBIT_SERIAL_NUMBER
+            if sn:
+                params.serial_number = str(sn)
             try:
                 params.timeout = int(EMOTIBIT_TIMEOUT)
             except Exception:
@@ -1987,6 +2042,261 @@ class EmotiBitThread(threading.Thread):
         log("[EmotiBit]", "Thread stopped.")
 
 # =====================================================
+# Setup wizard (PyQt5 dialogs)
+# =====================================================
+
+def _setup_qt_app():
+    """Create and theme the QApplication for wizard dialogs."""
+    from PyQt5 import QtWidgets as Qw, QtGui as Qg, QtCore as Qc
+    app = Qw.QApplication.instance()
+    if app is None:
+        app = Qw.QApplication(sys.argv)
+    app.setStyle("Fusion")
+    # Load Montserrat
+    font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Viewer", "fonts")
+    if os.path.isdir(font_dir):
+        for fn in os.listdir(font_dir):
+            if fn.endswith(".ttf"):
+                Qg.QFontDatabase.addApplicationFont(os.path.join(font_dir, fn))
+    app.setFont(Qg.QFont("Montserrat", 10))
+    # Dark palette
+    pal = Qg.QPalette()
+    _c = Qg.QColor
+    for role, c in [
+        (Qg.QPalette.Window, _c("#0f1318")),
+        (Qg.QPalette.WindowText, _c("#e8ecf0")),
+        (Qg.QPalette.Base, _c("#252d38")),
+        (Qg.QPalette.Text, _c("#e8ecf0")),
+        (Qg.QPalette.Button, _c("#1e252e")),
+        (Qg.QPalette.ButtonText, _c("#e8ecf0")),
+        (Qg.QPalette.Highlight, _c("#05abc4")),
+        (Qg.QPalette.HighlightedText, _c("#ffffff")),
+    ]:
+        pal.setColor(role, c)
+    app.setPalette(pal)
+    return app
+
+
+@dataclass
+class ParticipantConfig:
+    """Configuration for one participant from the setup wizard."""
+    participant_id: str           # "P01", "P02", ...
+    polar_enabled: bool = False
+    polar_address: str = ""       # BLE MAC
+    polar_name: str = ""          # friendly name
+    emotibit_enabled: bool = False
+    emotibit_serial: str = ""     # serial number
+    emotibit_name: str = ""       # friendly name
+
+
+def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
+    """Run the multi-participant setup wizard. Returns config list or None if cancelled."""
+    from PyQt5 import QtWidgets as Qw, QtGui as Qg, QtCore as Qc
+
+    app = _setup_qt_app()
+    ACCENT = "#05abc4"
+    BG_CARD = "#1e252e"
+    BORDER = "#2a3340"
+    GRAY = "#657179"
+    TEXT = "#e8ecf0"
+
+    btn_style = f"""
+        QPushButton {{
+            background: {BG_CARD}; color: {TEXT};
+            border: 1px solid {BORDER}; border-radius: 6px;
+            padding: 8px 20px; font-size: 13px; font-weight: 600;
+        }}
+        QPushButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}
+        QPushButton:pressed {{ background: {ACCENT}; color: white; }}
+    """
+
+    # ── Dialog 1: Number of participants ──
+    d1 = Qw.QDialog()
+    d1.setWindowTitle("BiHome — Setup")
+    d1.setFixedSize(380, 220)
+    l1 = Qw.QVBoxLayout(d1)
+    l1.setSpacing(12)
+    l1.setContentsMargins(24, 24, 24, 24)
+
+    title = Qw.QLabel("BiHome")
+    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 28px; color: {ACCENT};")
+    l1.addWidget(title)
+    l1.addWidget(Qw.QLabel("How many participants?"))
+
+    spin = Qw.QSpinBox()
+    spin.setRange(1, 6); spin.setValue(1)
+    spin.setStyleSheet(f"""
+        QSpinBox {{
+            background: #252d38; color: {TEXT}; border: 1px solid {BORDER};
+            border-radius: 6px; padding: 8px; font-size: 16px; min-width: 80px;
+        }}
+    """)
+    l1.addWidget(spin)
+
+    ok1 = Qw.QPushButton("Next")
+    ok1.setStyleSheet(btn_style)
+    ok1.clicked.connect(d1.accept)
+    l1.addWidget(ok1)
+
+    if d1.exec_() != Qw.QDialog.Accepted:
+        return None
+    n_participants = spin.value()
+
+    # ── Dialog 2: Device assignment ──
+    d2 = Qw.QDialog()
+    d2.setWindowTitle("BiHome — Device Assignment")
+    d2.setMinimumWidth(550)
+    l2 = Qw.QVBoxLayout(d2)
+    l2.setSpacing(12)
+    l2.setContentsMargins(24, 24, 24, 24)
+
+    title2 = Qw.QLabel("BiHome")
+    title2.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; color: {ACCENT};")
+    l2.addWidget(title2)
+    l2.addWidget(Qw.QLabel("Assign devices to each participant:"))
+
+    grid = Qw.QGridLayout()
+    grid.setSpacing(8)
+    # Header
+    for ci, h in enumerate(["", "Polar H10", "", "EmotiBit", ""]):
+        lbl = Qw.QLabel(h)
+        lbl.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold;")
+        grid.addWidget(lbl, 0, ci)
+
+    polar_names = list(KNOWN_POLAR.keys())
+    emotibit_names = list(KNOWN_EMOTIBIT.keys())
+
+    polar_cbs = []; polar_combos = []
+    emo_cbs = []; emo_combos = []
+
+    for pi in range(n_participants):
+        pid = f"P{pi+1:02d}"
+        lbl = Qw.QLabel(pid)
+        lbl.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {ACCENT};")
+        grid.addWidget(lbl, pi + 1, 0)
+
+        # Polar checkbox + combo
+        pcb = Qw.QCheckBox()
+        pcb.setChecked(len(polar_names) > 0)
+        grid.addWidget(pcb, pi + 1, 1)
+        pcombo = Qw.QComboBox()
+        pcombo.addItems(polar_names if polar_names else ["(no Polar found)"])
+        pcombo.setStyleSheet(f"QComboBox {{ background: #252d38; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px; padding: 4px; }}")
+        if pi < len(polar_names):
+            pcombo.setCurrentIndex(pi)
+        pcb.toggled.connect(pcombo.setEnabled)
+        pcombo.setEnabled(pcb.isChecked())
+        grid.addWidget(pcombo, pi + 1, 2)
+        polar_cbs.append(pcb); polar_combos.append(pcombo)
+
+        # EmotiBit checkbox + combo
+        ecb = Qw.QCheckBox()
+        ecb.setChecked(len(emotibit_names) > 0)
+        grid.addWidget(ecb, pi + 1, 3)
+        ecombo = Qw.QComboBox()
+        ecombo.addItems(emotibit_names if emotibit_names else ["(no EmotiBit found)"])
+        ecombo.setStyleSheet(f"QComboBox {{ background: #252d38; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px; padding: 4px; }}")
+        ecb.toggled.connect(ecombo.setEnabled)
+        ecombo.setEnabled(ecb.isChecked())
+        grid.addWidget(ecombo, pi + 1, 4)
+        emo_cbs.append(ecb); emo_combos.append(ecombo)
+
+    l2.addLayout(grid)
+
+    ok2 = Qw.QPushButton("Connect")
+    ok2.setStyleSheet(btn_style)
+    ok2.clicked.connect(d2.accept)
+    l2.addWidget(ok2)
+
+    if d2.exec_() != Qw.QDialog.Accepted:
+        return None
+
+    # Build config list
+    configs = []
+    for pi in range(n_participants):
+        pid = f"P{pi+1:02d}"
+        pc = ParticipantConfig(participant_id=pid)
+        if polar_cbs[pi].isChecked() and polar_names:
+            pname = polar_combos[pi].currentText()
+            pc.polar_enabled = True
+            pc.polar_name = pname
+            pc.polar_address = KNOWN_POLAR.get(pname, "")
+        if emo_cbs[pi].isChecked() and emotibit_names:
+            ename = emo_combos[pi].currentText()
+            pc.emotibit_enabled = True
+            pc.emotibit_name = ename
+            pc.emotibit_serial = KNOWN_EMOTIBIT.get(ename, "")
+        configs.append(pc)
+
+    return configs
+
+
+def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
+    """Show connection progress. Returns True when all connected, False if cancelled."""
+    from PyQt5 import QtWidgets as Qw, QtCore as Qc
+
+    app = Qw.QApplication.instance() or _setup_qt_app()
+    ACCENT = "#05abc4"
+
+    d = Qw.QDialog()
+    d.setWindowTitle("BiHome — Connecting")
+    d.setFixedSize(400, 200)
+    lay = Qw.QVBoxLayout(d)
+    lay.setContentsMargins(24, 24, 24, 24)
+    lay.setSpacing(12)
+
+    title = Qw.QLabel("BiHome")
+    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; color: {ACCENT};")
+    lay.addWidget(title)
+
+    status_lbl = Qw.QLabel("Connecting to devices...")
+    status_lbl.setStyleSheet("font-size: 13px;")
+    status_lbl.setWordWrap(True)
+    lay.addWidget(status_lbl)
+
+    progress = Qw.QProgressBar()
+    progress.setRange(0, len(healths))
+    progress.setStyleSheet(f"""
+        QProgressBar {{ border: 1px solid #2a3340; border-radius: 6px; text-align: center; background: #252d38; color: white; }}
+        QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
+    """)
+    lay.addWidget(progress)
+
+    cancel_btn = Qw.QPushButton("Cancel")
+    cancel_btn.clicked.connect(d.reject)
+    lay.addWidget(cancel_btn)
+
+    _result = [False]
+
+    def _poll():
+        connected = 0
+        details = []
+        for name, h in healths.items():
+            state, detail, _, _, first_data, _ = h.snapshot()
+            if first_data or state == "ACTIVE":
+                connected += 1
+                details.append(f"{name}: connected")
+            elif state == "ERROR":
+                details.append(f"{name}: ERROR")
+            else:
+                details.append(f"{name}: {detail or state}...")
+        progress.setValue(connected)
+        status_lbl.setText("\n".join(details))
+        if connected >= len(healths):
+            status_lbl.setText("All devices connected!")
+            Qc.QTimer.singleShot(800, d.accept)
+
+    timer = Qc.QTimer()
+    timer.timeout.connect(_poll)
+    timer.start(500)
+
+    if d.exec_() == Qw.QDialog.Accepted:
+        _result[0] = True
+    timer.stop()
+    return _result[0]
+
+
+# =====================================================
 # Main
 # =====================================================
 
@@ -1994,10 +2304,88 @@ def main():
     threads: List[threading.Thread] = []
     devices: List[str] = []
 
-    health_wifi = DeviceHealth(name="ArduinoWiFi(ECG)", enabled=ENABLE_ARDUINO_WIFI_ECG)
-    health_polar = DeviceHealth(name="ArduinoUSB(Polar)", enabled=ENABLE_ARDUINO_USB_POLAR)
-    health_bleak_polar = DeviceHealth(name="BleakPolar(H10)", enabled=ENABLE_BLEAK_POLAR)
-    health_emo = DeviceHealth(name="EmotiBit", enabled=ENABLE_EMOTIBIT)
+    # ── Run setup wizard ──
+    configs = run_setup_wizard()
+    if configs is None:
+        print("Setup cancelled.")
+        return
+
+    # ── Create per-participant threads ──
+    all_healths: Dict[str, DeviceHealth] = {}
+
+    for pc in configs:
+        pid = pc.participant_id
+
+        if pc.polar_enabled and pc.polar_address:
+            label_map = make_polar_label_map(pid)
+            h = DeviceHealth(name=f"{pid} Polar ({pc.polar_name})", enabled=True)
+            all_healths[h.name] = h
+            t = BleakPolarThread(address=pc.polar_address, label_map=label_map, health=h)
+            t.start()
+            threads.append(t)
+            devices.append(h.name)
+            log("[Main]", f"Started {h.name} → {pc.polar_address}")
+
+        if pc.emotibit_enabled:
+            h = DeviceHealth(name=f"{pid} EmotiBit ({pc.emotibit_name})", enabled=True)
+            all_healths[h.name] = h
+            t = EmotiBitThread(health=h, participant_id=pid,
+                               serial_number=pc.emotibit_serial)
+            t.start()
+            threads.append(t)
+            devices.append(h.name)
+            log("[Main]", f"Started {h.name}")
+
+    if not threads:
+        print("No devices configured. Exiting.")
+        return
+
+    # ── Connection progress dialog ──
+    connected = run_connection_dialog(all_healths)
+    if not connected:
+        print("Connection cancelled.")
+        stop_event.set()
+        return
+
+    # ── Launch viewer ──
+    viewer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Viewer", "lsl_viewer.py")
+    viewer_proc = None
+    if os.path.isfile(viewer_path):
+        log("[Main]", f"Launching viewer: {viewer_path}")
+        viewer_proc = subprocess.Popen([sys.executable, viewer_path])
+
+    # ── Monitor (replaces old main loop) ──
+    monitor_devices = [MonitoredDevice(health=h, thread=None) for h in all_healths.values()]
+    # Find thread references
+    for md in monitor_devices:
+        for t in threads:
+            if hasattr(t, 'health') and t.health is md.health:
+                md.thread = t
+                break
+
+    mon = SystemMonitorThread(monitor_devices)
+    mon.start()
+
+    print(f"\n=== Acquisition running ({len(configs)} participants, {len(threads)} devices) ===")
+    print("Active:", ", ".join(devices))
+    print("Type 'quit' to stop.\n", flush=True)
+
+    try:
+        for line in sys.stdin:
+            cmd = line.strip()
+            if cmd.lower() == "quit":
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        if viewer_proc:
+            try:
+                viewer_proc.terminate()
+            except Exception:
+                pass
+        time.sleep(0.5)
+        print("Shutdown complete.", flush=True)
 
     wifi_thread: Optional[ArduinoWiFiECGThread] = None
     polar_thread: Optional[ArduinoUSBPolarThread] = None

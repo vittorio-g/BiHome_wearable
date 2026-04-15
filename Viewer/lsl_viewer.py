@@ -10,7 +10,7 @@ BPM and HRV computation from beat channel, beat markers on ECG.
 """
 from __future__ import annotations
 
-import os, sys, time, json, threading, subprocess, signal
+import os, sys, re, time, json, threading, subprocess, signal
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -278,6 +278,18 @@ class YScaleWidget(QtWidgets.QWidget):
     def manual(self): return self.mn.value(), self.mx.value()
 
 
+_PID_RE = re.compile(r'^(P\d{2})_')
+
+def extract_participant(stream_name: str) -> Tuple[str, str]:
+    """Extract participant ID from stream name. Returns (pid, short_name).
+    E.g. 'P01_PolarH10_Sens' → ('P01', 'PolarH10_Sens').
+    Streams without prefix → ('', stream_name)."""
+    m = _PID_RE.match(stream_name)
+    if m:
+        return m.group(1), stream_name[m.end():]
+    return "", stream_name
+
+
 # ── channel row ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -381,11 +393,13 @@ class Viewer(QtWidgets.QMainWindow):
         self._diag_done: set = set()
         self._diag_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diag")
 
-        # BPM / HRV state
-        self._beat_times: deque = deque(maxlen=200)  # recent beat timestamps
-        self._bpm = 0.0
-        self._hrv_sdnn = 0.0
-        self._hrv_rmssd = 0.0
+        # Per-participant BPM / HRV state
+        # Maps participant_id → {beat_times, bpm, hrv_sdnn, hrv_rmssd, hr_lbl, hrv_lbl}
+        self._participant_hr: Dict[str, dict] = {}
+        # Maps participant_id → list of stream keys
+        self._participant_streams: Dict[str, List[str]] = {}
+        # Maps participant_id → REC checkbox widget
+        self._participant_rec_cbs: Dict[str, QtWidgets.QCheckBox] = {}
 
         self._build_ui()
         self._load_settings()
@@ -526,18 +540,6 @@ class Viewer(QtWidgets.QMainWindow):
         self._rec_start_time: float = 0.0
 
         sl.addWidget(self._sep())
-
-        # ── Vitals ──
-        self.hr_lbl = QtWidgets.QLabel("")
-        self.hr_lbl.setStyleSheet(f"""
-            font-family: 'Montserrat Bold', 'Montserrat', sans-serif;
-            font-size: 26px; font-weight: bold; color: {ACCENT};
-        """)
-        sl.addWidget(self.hr_lbl)
-        self.hrv_lbl = QtWidgets.QLabel("")
-        self.hrv_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT_DIM};")
-        self.hrv_lbl.setWordWrap(True)
-        sl.addWidget(self.hrv_lbl)
 
         self.delay_lbl = QtWidgets.QLabel("Delays: --")
         self.delay_lbl.setStyleSheet(f"font-size: 10px; color: {GRAY};")
@@ -689,7 +691,17 @@ class Viewer(QtWidgets.QMainWindow):
             if key in self.streams:
                 continue
             self.streams[key] = st
-            self._add_stream_ui(key, st)
+
+            # Track participant grouping
+            pid, _ = extract_participant(st.name)
+            if not pid:
+                pid = "_other"
+            if pid not in self._participant_streams:
+                self._participant_streams[pid] = []
+                self._add_participant_header(pid)
+            self._participant_streams[pid].append(key)
+
+            self._add_stream_ui(key, st, pid)
             r = Reader(st); self.readers.append(r); r.start()
             added = True
 
@@ -697,28 +709,74 @@ class Viewer(QtWidgets.QMainWindow):
             self._apply_stream_settings()
             self._rebuild_plots()
 
-    def _add_stream_ui(self, key: str, st: StreamState):
-        # Stream header card
+    def _add_participant_header(self, pid: str):
+        """Add a participant group header to the sidebar."""
+        label = pid if pid != "_other" else "Other"
         hw = QtWidgets.QWidget()
-        hw.setStyleSheet(f"QWidget {{ background: {BG_CARD}; border-radius: 6px; }}")
+        hw.setStyleSheet(f"""
+            QWidget {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(5,171,196,0.15), stop:1 {BG_CARD});
+                border-radius: 6px;
+            }}
+        """)
         hl = QtWidgets.QHBoxLayout(hw)
-        hl.setContentsMargins(10, 6, 10, 6)
-        lbl = QtWidgets.QLabel(
-            f"<span style='color:{TEXT_PRIMARY}; font-weight:600;'>{st.name}</span>"
-            f"<br><span style='color:{GRAY}; font-size:10px;'>"
-            f"{st.stype} | {st.srate:.0f} Hz | {len(st.ch_labels)} ch</span>")
+        hl.setContentsMargins(12, 8, 12, 8)
+        lbl = QtWidgets.QLabel(label)
+        lbl.setStyleSheet(f"""
+            font-family: 'Montserrat Bold'; font-size: 16px;
+            font-weight: bold; color: {ACCENT};
+        """)
         hl.addWidget(lbl, stretch=1)
+
         rec_cb = QtWidgets.QCheckBox("REC")
         rec_cb.setChecked(True)
-        rec_cb.setToolTip("Include this stream in recording")
         rec_cb.setStyleSheet(f"""
             QCheckBox {{ color: {RED_REC}; font-size: 11px; font-weight: bold; }}
-            QCheckBox::indicator {{ width: 14px; height: 14px; }}
         """)
         hl.addWidget(rec_cb)
+        self._participant_rec_cbs[pid] = rec_cb
+
+        self.ch_lay.addWidget(hw)
+
+        # HR/HRV labels for this participant
+        hr_lbl = QtWidgets.QLabel("")
+        hr_lbl.setStyleSheet(f"""
+            font-family: 'Montserrat Bold'; font-size: 18px;
+            font-weight: bold; color: {ACCENT}; padding-left: 12px;
+        """)
+        self.ch_lay.addWidget(hr_lbl)
+        hrv_lbl = QtWidgets.QLabel("")
+        hrv_lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_DIM}; padding-left: 12px;")
+        hrv_lbl.setWordWrap(True)
+        self.ch_lay.addWidget(hrv_lbl)
+
+        self._participant_hr[pid] = {
+            "beat_times": deque(maxlen=200),
+            "bpm": 0.0, "hrv_sdnn": 0.0, "hrv_rmssd": 0.0,
+            "hr_lbl": hr_lbl, "hrv_lbl": hrv_lbl,
+        }
+
+    def _add_stream_ui(self, key: str, st: StreamState, pid: str = ""):
+        # Stream sub-header (smaller, within participant group)
+        _, short_name = extract_participant(st.name)
+        hw = QtWidgets.QWidget()
+        hw.setStyleSheet(f"QWidget {{ background: {BG_CARD}; border-radius: 4px; }}")
+        hl = QtWidgets.QHBoxLayout(hw)
+        hl.setContentsMargins(12, 4, 12, 4)
+        lbl = QtWidgets.QLabel(
+            f"<span style='color:{TEXT_PRIMARY}; font-size:12px; font-weight:600;'>"
+            f"{short_name}</span>"
+            f"  <span style='color:{GRAY}; font-size:9px;'>"
+            f"{st.srate:.0f} Hz | {len(st.ch_labels)} ch</span>")
+        hl.addWidget(lbl, stretch=1)
+        # REC is now at participant level, so no per-stream checkbox needed
+        # But keep _stream_rec_cbs for backward compat with recording code
         if not hasattr(self, '_stream_rec_cbs'):
             self._stream_rec_cbs: Dict[str, QtWidgets.QCheckBox] = {}
-        self._stream_rec_cbs[key] = rec_cb
+        # Link to participant REC checkbox
+        if pid and pid in self._participant_rec_cbs:
+            self._stream_rec_cbs[key] = self._participant_rec_cbs[pid]
         self.ch_lay.addWidget(hw)
 
         # Column headers (inside scroll area, moves with content)
@@ -913,59 +971,57 @@ class Viewer(QtWidgets.QMainWindow):
 
     # ── BPM / HRV ───────────────────────────────────────────────────────
 
-    def _find_beat_channel(self) -> Optional[Tuple[str, int]]:
-        """Find the beat channel (skey, ch_index) in streams."""
+    def _find_beat_channels(self) -> Dict[str, Tuple[str, int]]:
+        """Find beat channels per participant. Returns {pid: (skey, ch_index)}."""
+        result = {}
         for key, st in self.streams.items():
+            pid, _ = extract_participant(st.name)
+            if not pid:
+                pid = "_other"
             for ci, cl in enumerate(st.ch_labels):
-                if cl.lower() == "beat":
-                    return key, ci
-        return None
+                if cl.lower() == "beat" and pid not in result:
+                    result[pid] = (key, ci)
+        return result
 
     def _update_hr(self, t_min: float):
-        """Extract beat timestamps from the beat channel and compute BPM/HRV."""
-        bc = self._find_beat_channel()
-        if bc is None:
-            return
-        skey, ci = bc
-        buf = self.streams[skey].bufs[ci]
-        ts, vs = buf.raw_snapshot(t_min)
-        if len(ts) < 2:
-            return
+        """Update BPM/HRV for all participants."""
+        beat_channels = self._find_beat_channels()
+        for pid, hr_state in self._participant_hr.items():
+            bc = beat_channels.get(pid)
+            if bc is None:
+                continue
+            skey, ci = bc
+            buf = self.streams[skey].bufs[ci]
+            ts, vs = buf.raw_snapshot(t_min)
+            if len(ts) < 2:
+                continue
 
-        # Find samples where beat == 1.0
-        beat_mask = vs > 0.5
-        beat_ts = ts[beat_mask]
+            beat_mask = vs > 0.5
+            beat_ts = ts[beat_mask]
+            if len(beat_ts) < 2:
+                continue
 
-        if len(beat_ts) < 2:
-            return
+            bt_deque = hr_state["beat_times"]
+            last_known = bt_deque[-1] if bt_deque else 0.0
+            for bt in beat_ts:
+                if bt > last_known:
+                    bt_deque.append(bt)
+                    last_known = bt
 
-        # Update beat_times deque with new beats
-        # Only add beats newer than what we have
-        last_known = self._beat_times[-1] if self._beat_times else 0.0
-        for bt in beat_ts:
-            if bt > last_known:
-                self._beat_times.append(bt)
-                last_known = bt
+            now_ts = beat_ts[-1]
+            recent = [t for t in bt_deque if t > now_ts - 30.0]
+            if len(recent) < 3:
+                continue
 
-        # Compute from recent beats (last 30s)
-        now_ts = beat_ts[-1]
-        recent = [t for t in self._beat_times if t > now_ts - 30.0]
-        if len(recent) < 3:
-            return
+            rr = np.diff(recent)
+            valid = rr[(rr >= 0.3) & (rr <= 1.8)]
+            if len(valid) < 2:
+                continue
 
-        rr = np.diff(recent)
-        # Filter physiological range
-        valid = rr[(rr >= 0.3) & (rr <= 1.8)]
-        if len(valid) < 2:
-            return
-
-        mean_rr = np.mean(valid)
-        self._bpm = 60.0 / mean_rr
-
-        # HRV metrics
-        self._hrv_sdnn = float(np.std(valid, ddof=1)) * 1000.0  # ms
-        diffs = np.diff(valid)
-        self._hrv_rmssd = float(np.sqrt(np.mean(diffs ** 2))) * 1000.0 if len(diffs) > 0 else 0.0
+            hr_state["bpm"] = 60.0 / float(np.mean(valid))
+            hr_state["hrv_sdnn"] = float(np.std(valid, ddof=1)) * 1000.0
+            diffs = np.diff(valid)
+            hr_state["hrv_rmssd"] = float(np.sqrt(np.mean(diffs ** 2))) * 1000.0 if len(diffs) > 0 else 0.0
 
     # ── refresh ──────────────────────────────────────────────────────────
 
@@ -1011,16 +1067,18 @@ class Viewer(QtWidgets.QMainWindow):
             self.delay_lbl.setText(
                 "Delays: " + ("  |  ".join(parts) if parts else "--"))
 
-            # BPM/HRV
+            # BPM/HRV per participant
             t_min_hr = now - 60.0
             self._update_hr(t_min_hr)
-            if self._bpm > 0:
-                self.hr_lbl.setText(f"HR: {self._bpm:.0f} bpm")
-                self.hrv_lbl.setText(
-                    f"SDNN: {self._hrv_sdnn:.1f} ms  |  RMSSD: {self._hrv_rmssd:.1f} ms")
-            else:
-                self.hr_lbl.setText("HR: --")
-                self.hrv_lbl.setText("")
+            for pid, hr_state in self._participant_hr.items():
+                if hr_state["bpm"] > 0:
+                    hr_state["hr_lbl"].setText(f"HR: {hr_state['bpm']:.0f} bpm")
+                    hr_state["hrv_lbl"].setText(
+                        f"SDNN: {hr_state['hrv_sdnn']:.1f} ms  |  "
+                        f"RMSSD: {hr_state['hrv_rmssd']:.1f} ms")
+                else:
+                    hr_state["hr_lbl"].setText("HR: --")
+                    hr_state["hrv_lbl"].setText("")
 
             # Recompute data for all rows
             for ri, cr in enumerate(self.rows):
@@ -1046,7 +1104,12 @@ class Viewer(QtWidgets.QMainWindow):
                 # actual R-peak.  For each beat event, find the positive
                 # maximum in ECG within [beat_ts - 0.5s, beat_ts].
                 if cr.beat_scatter is not None:
-                    bc = self._find_beat_channel()
+                    cr_pid, _ = extract_participant(
+                        self.streams[cr.skey].name if cr.skey in self.streams else "")
+                    if not cr_pid:
+                        cr_pid = "_other"
+                    beat_chs = self._find_beat_channels()
+                    bc = beat_chs.get(cr_pid)
                     if bc is not None:
                         skey_beat, ci_beat = bc
                         if skey_beat == cr.skey:
