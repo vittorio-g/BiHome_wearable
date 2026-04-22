@@ -2575,6 +2575,23 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
             rows[phase] = {"icon": icon, "label": label, "done": False}
         row_widgets[name] = rows
 
+    btn_row = Qw.QHBoxLayout()
+    btn_row.addStretch()
+
+    # "Continue anyway" — becomes enabled after 10s so the user can skip
+    # ahead to the viewer when connected but no data (useful for diagnosing)
+    continue_btn = Qw.QPushButton("Continue anyway")
+    continue_btn.setEnabled(False)
+    continue_btn.setStyleSheet(f"""
+        QPushButton {{ background: #1e252e; color: {GRAY};
+                       border: 1px solid {BORDER}; border-radius: 4px;
+                       padding: 6px 16px; }}
+        QPushButton:enabled {{ color: {TEXT}; }}
+        QPushButton:hover:enabled {{ border-color: {ACCENT}; color: {ACCENT}; }}
+    """)
+    continue_btn.clicked.connect(d.accept)
+    btn_row.addWidget(continue_btn)
+
     cancel_btn = Qw.QPushButton("Cancel")
     cancel_btn.setStyleSheet(f"""
         QPushButton {{ background: #1e252e; color: {TEXT};
@@ -2583,7 +2600,10 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
         QPushButton:hover {{ border-color: {RED}; color: {RED}; }}
     """)
     cancel_btn.clicked.connect(d.reject)
-    lay.addWidget(cancel_btn, alignment=Qc.Qt.AlignRight)
+    btn_row.addWidget(cancel_btn)
+    lay.addLayout(btn_row)
+
+    _start_time = [time.time()]
 
     _result = [False]
 
@@ -2594,7 +2614,8 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
             r["icon"].setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold;")
             r["label"].setStyleSheet(f"color: {TEXT}; font-size: 11px;")
             r["done"] = True
-        if detail and not r["done"]:
+        # Always update the detail text if provided (even after done)
+        if detail:
             r["label"].setText(detail)
 
     def _poll():
@@ -2604,18 +2625,16 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
             r_connect = row_widgets[name]["connect"]
             r_stream  = row_widgets[name]["stream"]
 
-            # Phase 1: connected once state was EVER ACTIVE or any data arrived.
-            # State can bounce back to CONNECTING on reconnect — the bullet
-            # stays green once set.
+            # Phase 1: connected when state was EVER ACTIVE or data arrived
             if (state == "ACTIVE") or first_data or (state == "ERROR"):
                 _set_step(name, "connect", True)
             else:
                 _set_step(name, "connect", False,
                           f"{detail or state}..." if state != "INIT" else "")
 
-            # Phase 2: streaming
+            # Phase 2: streaming — also show live detail while waiting
             if first_data:
-                _set_step(name, "stream", True)
+                _set_step(name, "stream", True, "Streaming data")
             else:
                 all_streaming = False
                 if state == "ERROR":
@@ -2624,18 +2643,26 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
                     r_stream["label"].setText(err or "Error")
                     r_stream["label"].setStyleSheet(f"color: {RED}; font-size: 11px;")
                 elif r_connect["done"]:
-                    _set_step(name, "stream", False, "Waiting for data...")
+                    # Show live status detail (e.g. "streaming" from health)
+                    live_detail = f"Waiting for data... ({detail})" if detail else "Waiting for data..."
+                    _set_step(name, "stream", False, live_detail)
 
             if not r_stream["done"]:
                 all_streaming = False
 
-        # Count steps based on done flags (cumulative — not transient)
         done_steps = 0
         for rows in row_widgets.values():
             if rows["connect"]["done"]: done_steps += 1
             if rows["stream"]["done"]:  done_steps += 1
 
         progress.setValue(done_steps)
+
+        # Enable "Continue anyway" after 10s so the user can proceed even
+        # if we're stuck waiting for data
+        elapsed = time.time() - _start_time[0]
+        if elapsed > 10 and not continue_btn.isEnabled():
+            continue_btn.setEnabled(True)
+
         if all_streaming and done_steps >= total_steps:
             status_lbl.setText("All devices streaming data!")
             Qc.QTimer.singleShot(600, d.accept)
