@@ -2241,7 +2241,32 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     l1.addWidget(title)
     l1.addWidget(Qw.QLabel("How many participants?"))
 
-    spin = Qw.QSpinBox()
+    # SpinBox with custom arrow painting so triangles are always visible
+    class _ArrowSpin(Qw.QSpinBox):
+        def paintEvent(self, ev):
+            super().paintEvent(ev)
+            from PyQt5 import QtGui as Qg, QtCore as Qc2
+            p = Qg.QPainter(self)
+            p.setRenderHint(Qg.QPainter.Antialiasing, True)
+            p.setBrush(Qg.QColor("#e8ecf0" if self.isEnabled() else "#2a3340"))
+            p.setPen(Qc2.Qt.NoPen)
+            opt = Qw.QStyleOptionSpinBox(); self.initStyleOption(opt)
+            up = self.style().subControlRect(Qw.QStyle.CC_SpinBox, opt, Qw.QStyle.SC_SpinBoxUp, self)
+            dn = self.style().subControlRect(Qw.QStyle.CC_SpinBox, opt, Qw.QStyle.SC_SpinBoxDown, self)
+            s = 5
+            p.drawPolygon(Qg.QPolygon([
+                Qc2.QPoint(up.center().x() - s, up.center().y() + s // 2 + 1),
+                Qc2.QPoint(up.center().x() + s, up.center().y() + s // 2 + 1),
+                Qc2.QPoint(up.center().x(),     up.center().y() - s + 1),
+            ]))
+            p.drawPolygon(Qg.QPolygon([
+                Qc2.QPoint(dn.center().x() - s, dn.center().y() - s // 2),
+                Qc2.QPoint(dn.center().x() + s, dn.center().y() - s // 2),
+                Qc2.QPoint(dn.center().x(),     dn.center().y() + s),
+            ]))
+            p.end()
+
+    spin = _ArrowSpin()
     spin.setRange(1, 6); spin.setValue(1)
     spin.setStyleSheet(f"""
         QSpinBox {{

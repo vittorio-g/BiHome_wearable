@@ -230,6 +230,79 @@ class Reader(threading.Thread):
 
 # ── Y-scale widget ───────────────────────────────────────────────────────────
 
+class ArrowSpinBox(QtWidgets.QDoubleSpinBox):
+    """QDoubleSpinBox that paints its own arrow triangles on top of the
+    up/down buttons, bypassing style-sheet conflicts with the native style."""
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        enabled = self.isEnabled()
+        color = QtGui.QColor(TEXT_PRIMARY if enabled else BORDER)
+        painter.setBrush(color)
+        painter.setPen(QtCore.Qt.NoPen)
+
+        opt = QtWidgets.QStyleOptionSpinBox()
+        self.initStyleOption(opt)
+        up_rect = self.style().subControlRect(
+            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxUp, self)
+        dn_rect = self.style().subControlRect(
+            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxDown, self)
+
+        # Up arrow: triangle pointing up, centered in up_rect
+        cx_u = up_rect.center().x()
+        cy_u = up_rect.center().y()
+        s = 3
+        tri_up = QtGui.QPolygon([
+            QtCore.QPoint(cx_u - s, cy_u + s // 2 + 1),
+            QtCore.QPoint(cx_u + s, cy_u + s // 2 + 1),
+            QtCore.QPoint(cx_u, cy_u - s + 1),
+        ])
+        painter.drawPolygon(tri_up)
+
+        # Down arrow
+        cx_d = dn_rect.center().x()
+        cy_d = dn_rect.center().y()
+        tri_dn = QtGui.QPolygon([
+            QtCore.QPoint(cx_d - s, cy_d - s // 2),
+            QtCore.QPoint(cx_d + s, cy_d - s // 2),
+            QtCore.QPoint(cx_d, cy_d + s),
+        ])
+        painter.drawPolygon(tri_dn)
+        painter.end()
+
+
+class ArrowIntSpinBox(QtWidgets.QSpinBox):
+    """Integer version of ArrowSpinBox for the participant count dialog."""
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        color = QtGui.QColor("#e8ecf0" if self.isEnabled() else "#2a3340")
+        painter.setBrush(color); painter.setPen(QtCore.Qt.NoPen)
+        opt = QtWidgets.QStyleOptionSpinBox()
+        self.initStyleOption(opt)
+        up_rect = self.style().subControlRect(
+            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxUp, self)
+        dn_rect = self.style().subControlRect(
+            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxDown, self)
+        s = 4
+        tri_up = QtGui.QPolygon([
+            QtCore.QPoint(up_rect.center().x() - s, up_rect.center().y() + s // 2 + 1),
+            QtCore.QPoint(up_rect.center().x() + s, up_rect.center().y() + s // 2 + 1),
+            QtCore.QPoint(up_rect.center().x(), up_rect.center().y() - s + 1),
+        ])
+        tri_dn = QtGui.QPolygon([
+            QtCore.QPoint(dn_rect.center().x() - s, dn_rect.center().y() - s // 2),
+            QtCore.QPoint(dn_rect.center().x() + s, dn_rect.center().y() - s // 2),
+            QtCore.QPoint(dn_rect.center().x(), dn_rect.center().y() + s),
+        ])
+        painter.drawPolygon(tri_up)
+        painter.drawPolygon(tri_dn)
+        painter.end()
+
+
 class YScaleWidget(QtWidgets.QWidget):
     changed = QtCore.pyqtSignal()
 
@@ -237,38 +310,21 @@ class YScaleWidget(QtWidgets.QWidget):
         QDoubleSpinBox {{
             background: {BG_INPUT}; color: {TEXT_PRIMARY};
             border: 1px solid {BORDER}; border-radius: 3px;
-            padding: 2px 18px 2px 4px; font-size: 10px;
+            padding: 2px 16px 2px 4px; font-size: 10px;
         }}
         QDoubleSpinBox:disabled {{ color: {GRAY}; background: transparent; border-color: {BORDER}; }}
         QDoubleSpinBox::up-button {{
             subcontrol-origin: border; subcontrol-position: top right;
             background: {BG_CARD}; border-left: 1px solid {BORDER};
-            width: 14px; height: 9px;
+            width: 14px;
         }}
         QDoubleSpinBox::down-button {{
             subcontrol-origin: border; subcontrol-position: bottom right;
             background: {BG_CARD}; border-left: 1px solid {BORDER};
-            width: 14px; height: 9px;
+            width: 14px;
         }}
         QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
             background: {ACCENT_DIM};
-        }}
-        QDoubleSpinBox::up-arrow {{
-            image: none;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-bottom: 5px solid {TEXT_PRIMARY};
-            width: 0; height: 0;
-        }}
-        QDoubleSpinBox::down-arrow {{
-            image: none;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-top: 5px solid {TEXT_PRIMARY};
-            width: 0; height: 0;
-        }}
-        QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{
-            border-bottom-color: {BORDER}; border-top-color: {BORDER};
         }}
     """
 
@@ -290,13 +346,13 @@ class YScaleWidget(QtWidgets.QWidget):
         """)
         self.auto_cb.toggled.connect(self._toggle)
         lay.addWidget(self.auto_cb)
-        self.mn = QtWidgets.QDoubleSpinBox(); self.mn.setRange(-1e9, 1e9)
+        self.mn = ArrowSpinBox(); self.mn.setRange(-1e9, 1e9)
         self.mn.setDecimals(1); self.mn.setValue(-1)
         self.mn.setFixedWidth(self.SPIN_W)
         self.mn.setEnabled(False); self.mn.valueChanged.connect(self.changed)
         self.mn.setStyleSheet(self._SPIN_STYLE)
         lay.addWidget(self.mn)
-        self.mx = QtWidgets.QDoubleSpinBox(); self.mx.setRange(-1e9, 1e9)
+        self.mx = ArrowSpinBox(); self.mx.setRange(-1e9, 1e9)
         self.mx.setDecimals(1); self.mx.setValue(1)
         self.mx.setFixedWidth(self.SPIN_W)
         self.mx.setEnabled(False); self.mx.valueChanged.connect(self.changed)
@@ -766,7 +822,7 @@ class Viewer(QtWidgets.QMainWindow):
         wl = QtWidgets.QLabel("Window")
         wl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
         tw.addWidget(wl)
-        self.win_spin = QtWidgets.QDoubleSpinBox()
+        self.win_spin = ArrowSpinBox()
         self.win_spin.setRange(1, 600); self.win_spin.setDecimals(1)
         self.win_spin.setValue(WIN_S); self.win_spin.setSingleStep(1)
         self.win_spin.setSuffix(" s")
