@@ -21,6 +21,12 @@ import socket
 import select
 import subprocess
 import threading
+
+# Root dir: when frozen by PyInstaller, resources are in sys._MEIPASS
+if getattr(sys, "frozen", False):
+    _ROOT_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+else:
+    _ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -2165,13 +2171,32 @@ class EmotiBitThread(threading.Thread):
 
 def _setup_qt_app():
     """Create and theme the QApplication for wizard dialogs."""
+    # On Windows, declare AppUserModelID early so the taskbar uses our icon.
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "com.bihome.wearable")
+    except Exception:
+        pass
+
     from PyQt5 import QtWidgets as Qw, QtGui as Qg, QtCore as Qc
     app = Qw.QApplication.instance()
     if app is None:
         app = Qw.QApplication(sys.argv)
+    app.setApplicationName("BiHome Wearable")
+    app.setApplicationDisplayName("BiHome Wearable")
     app.setStyle("Fusion")
+
+    # App icon
+    ico_dir = os.path.join(_ROOT_DIR, "Viewer")
+    for candidate in ("bihome.ico", "bihome_logo.png"):
+        p = os.path.join(ico_dir, candidate)
+        if os.path.isfile(p):
+            app.setWindowIcon(Qg.QIcon(p))
+            break
+
     # Load Montserrat
-    font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Viewer", "fonts")
+    font_dir = os.path.join(_ROOT_DIR, "Viewer", "fonts")
     if os.path.isdir(font_dir):
         for fn in os.listdir(font_dir):
             if fn.endswith(".ttf"):
@@ -2440,9 +2465,10 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     return configs
 
 
-# Wizard defaults persistence — stored next to the script
-_WIZARD_DEFAULTS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "wizard_defaults.json")
+# Wizard defaults persistence — stored next to the exe/script (writable path)
+_WRITABLE_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+                 else os.path.dirname(os.path.abspath(__file__)))
+_WIZARD_DEFAULTS_FILE = os.path.join(_WRITABLE_DIR, "wizard_defaults.json")
 
 def _load_wizard_defaults() -> dict:
     try:
@@ -2672,7 +2698,7 @@ def main():
         return
 
     # ── Launch viewer ──
-    viewer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Viewer", "lsl_viewer.py")
+    viewer_path = os.path.join(_ROOT_DIR, "Viewer", "lsl_viewer.py")
     viewer_proc = None
     if os.path.isfile(viewer_path):
         log("[Main]", f"Launching viewer: {viewer_path}")

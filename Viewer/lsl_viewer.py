@@ -49,11 +49,17 @@ BEAT_SHIFT_S = 0.40       # beat detection delay (POST_S) — shift beat channel
 
 # LabRecorder paths (relative to this file's directory)
 _HERE = os.path.dirname(os.path.abspath(__file__))
+# Writable dir for settings/recordings: next to the .exe when frozen,
+# next to the script otherwise
+if getattr(sys, "frozen", False):
+    _WRITABLE_DIR = os.path.dirname(sys.executable)
+else:
+    _WRITABLE_DIR = os.path.dirname(_HERE)  # project root
 _FONT_DIR = os.path.join(_HERE, "fonts")
 _REC_DIR = os.path.join(os.path.dirname(_HERE), "LabRecorder")
 LABRECORDER_CLI = os.path.join(_REC_DIR, "LabRecorderCLI.exe")
-RECORDINGS_DIR = os.path.join(_HERE, "recordings")
-SETTINGS_FILE = os.path.join(_HERE, "viewer_settings.json")
+RECORDINGS_DIR = os.path.join(_WRITABLE_DIR, "recordings")
+SETTINGS_FILE = os.path.join(_WRITABLE_DIR, "viewer_settings.json")
 COLORS = [
     "#05abc4", "#ff7f0e", "#3acc6c", "#e83a3a", "#9467bd",
     "#f0c040", "#e377c2", "#8a939c", "#bcbd22", "#17becf",
@@ -615,6 +621,13 @@ class GroupPlotWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.group_key = group_key
         self.setWindowTitle(title)
+        # Inherit app icon
+        try:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                self.setWindowIcon(app.windowIcon())
+        except Exception:
+            pass
         self.resize(900, 700)
         # Apply same theme as main
         central = QtWidgets.QWidget()
@@ -2404,8 +2417,30 @@ def _load_fonts():
                     if families:
                         print(f"[Font] loaded: {families[0]} ({fn})")
 
+def _app_icon() -> 'QtGui.QIcon':
+    """Load the BiHome logo as a QIcon, or return an empty icon if missing."""
+    ico_path = os.path.join(_HERE, "bihome.ico")
+    png_path = os.path.join(_HERE, "bihome_logo.png")
+    if os.path.isfile(ico_path):
+        return QtGui.QIcon(ico_path)
+    if os.path.isfile(png_path):
+        return QtGui.QIcon(png_path)
+    return QtGui.QIcon()
+
 def main():
+    # On Windows, set AppUserModelID so the taskbar uses our icon instead of
+    # the generic Python icon.
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "com.bihome.wearable")
+    except Exception:
+        pass
+
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName("BiHome Wearable")
+    app.setApplicationDisplayName("BiHome Wearable")
+    app.setWindowIcon(_app_icon())
     _load_fonts()
     app.setStyle("Fusion")
 
@@ -2431,6 +2466,7 @@ def main():
     app.setFont(QtGui.QFont("Montserrat", 10))
 
     v = Viewer()
+    v.setWindowIcon(_app_icon())
     # Center controller on primary screen so the title bar is visible
     try:
         scr = QtWidgets.QApplication.primaryScreen().availableGeometry()
