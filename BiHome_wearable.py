@@ -2698,11 +2698,18 @@ def main():
         return
 
     # ── Launch viewer ──
-    viewer_path = os.path.join(_ROOT_DIR, "Viewer", "lsl_viewer.py")
+    # When running from source: spawn viewer as separate Python subprocess.
+    # When frozen (.exe): import the viewer module and run it in-process
+    # (sys.executable points to the BiHome Wearable.exe, not Python).
     viewer_proc = None
-    if os.path.isfile(viewer_path):
-        log("[Main]", f"Launching viewer: {viewer_path}")
-        viewer_proc = subprocess.Popen([sys.executable, viewer_path])
+    viewer_in_process = False
+    if getattr(sys, "frozen", False):
+        viewer_in_process = True
+    else:
+        viewer_path = os.path.join(_ROOT_DIR, "Viewer", "lsl_viewer.py")
+        if os.path.isfile(viewer_path):
+            log("[Main]", f"Launching viewer: {viewer_path}")
+            viewer_proc = subprocess.Popen([sys.executable, viewer_path])
 
     # ── Monitor (replaces old main loop) ──
     monitor_devices = [MonitoredDevice(health=h, thread=None) for h in all_healths.values()]
@@ -2720,16 +2727,23 @@ def main():
     print("Active:", ", ".join(devices))
     print("Type 'quit' to stop.\n", flush=True)
 
-    # Wait for either viewer subprocess to exit OR Ctrl-C OR 'quit' on stdin
+    # Wait for either viewer subprocess to exit OR run viewer in-process
     try:
-        while True:
-            # If viewer was launched, exit when it closes
-            if viewer_proc is not None:
-                rc = viewer_proc.poll()
-                if rc is not None:
-                    log("[Main]", f"Viewer closed (exit code {rc}), shutting down.")
-                    break
-            time.sleep(0.5)
+        if viewer_in_process:
+            # Frozen mode: import viewer and run on this thread.
+            # Qt needs the main thread, and _setup_qt_app() already created
+            # a QApplication during the wizard — reuse it.
+            sys.path.insert(0, os.path.join(_ROOT_DIR, "Viewer"))
+            import lsl_viewer as _viewer
+            _viewer.main()  # blocks until viewer window closed
+        else:
+            while True:
+                if viewer_proc is not None:
+                    rc = viewer_proc.poll()
+                    if rc is not None:
+                        log("[Main]", f"Viewer closed (exit code {rc}), shutting down.")
+                        break
+                time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:

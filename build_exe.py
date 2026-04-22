@@ -44,10 +44,24 @@ args = [
     # Embed the viewer script + Viewer assets so subprocess can find them
     "--add-data", f"{os.path.join(HERE, 'Viewer')}{os.pathsep}Viewer",
     "--add-data", f"{os.path.join(HERE, 'LabRecorder')}{os.pathsep}LabRecorder",
-    # pylsl ships native DLLs in site-packages; PyInstaller usually picks
-    # them up automatically via hooks.
+    # Add Viewer/ to the module search path so lsl_viewer can be imported
+    "--paths", os.path.join(HERE, "Viewer"),
+    "--hidden-import", "lsl_viewer",
+    # Native DLLs / data files that need explicit collection
     "--collect-all", "pylsl",
     "--collect-all", "pyqtgraph",
+    "--collect-all", "numpy",         # numpy 2.x + PyInstaller 6.x needs this
+    "--collect-all", "bleak",
+    "--collect-submodules", "brainflow",
+    # Exclude heavy unused packages — pyqtgraph tries to import matplotlib
+    # for optional features, pulling in a broken matplotlib-vs-numpy combo.
+    "--exclude-module", "matplotlib",
+    "--exclude-module", "tkinter",
+    "--exclude-module", "PyQt6",
+    "--exclude-module", "PySide2",
+    "--exclude-module", "PySide6",
+    "--exclude-module", "scipy",
+    "--exclude-module", "pandas",
     "BiHome_wearable.py",
 ]
 print("Running:", " ".join(args))
