@@ -182,6 +182,7 @@ class StreamState:
     bufs: List[RingBuffer] = field(default_factory=list)
     latest_ts: float = 0.0
     delay: float = 0.0
+    state_labels: List[str] = field(default_factory=list)  # for Marker state streams
 
     def __post_init__(self):
         self.bufs = [RingBuffer(self.srate) for _ in self.ch_labels]
@@ -454,6 +455,30 @@ class ChRow:
     color: str = ""
     beat_scatter: object = None
     row_widget: object = None     # the QWidget container for this row
+    group_key: str = ""           # participant_id or "_markers" / "_other"
+    state_labels: List[str] = field(default_factory=list)  # for marker state streams
+
+
+class GroupPlotWindow(QtWidgets.QMainWindow):
+    """A separate window that displays plots for one group (participant or markers)."""
+    def __init__(self, group_key: str, title: str, parent=None):
+        super().__init__(parent)
+        self.group_key = group_key
+        self.setWindowTitle(title)
+        self.resize(900, 700)
+        # Apply same theme as main
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        lay = QtWidgets.QVBoxLayout(central)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.pw = pg.GraphicsLayoutWidget()
+        self.pw.setBackground(BG_DARK)
+        lay.addWidget(self.pw)
+
+    def closeEvent(self, ev):
+        # Don't actually destroy — just hide, so channels can still exist
+        self.hide()
+        ev.ignore()
 
 
 # ── draggable channel row ────────────────────────────────────────────────────
@@ -589,10 +614,6 @@ class Viewer(QtWidgets.QMainWindow):
     # ── UI ────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        sp = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        sp.setHandleWidth(1)
-        self.setCentralWidget(sp)
-
         side = QtWidgets.QWidget()
         side.setObjectName("sidebar")
         side.setStyleSheet(f"#sidebar {{ background: {BG_PANEL}; }}")
@@ -771,13 +792,37 @@ class Viewer(QtWidgets.QMainWindow):
         self.markers: List[MarkerStream] = []
         self.marker_widgets: List[QtWidgets.QWidget] = []
 
-        sp.addWidget(side)
+        # Main window hosts only the sidebar (controls).  Plot windows are
+        # created separately per participant / markers group.
+        self.setCentralWidget(side)
+        self.resize(420, 900)
+        self.setWindowTitle("BiHome Controller")
 
-        self.pw = pg.GraphicsLayoutWidget()
-        self.pw.setBackground(BG_DARK)
-        sp.addWidget(self.pw)
-        sp.setStretchFactor(0, 0); sp.setStretchFactor(1, 1)
-        sp.setSizes([320, 1080])
+        # group_key → GroupPlotWindow
+        self._plot_windows: Dict[str, GroupPlotWindow] = {}
+
+    def _get_or_create_plot_window(self, group_key: str) -> GroupPlotWindow:
+        """Return the plot window for a group, creating+showing it if new."""
+        if group_key in self._plot_windows:
+            w = self._plot_windows[group_key]
+            if not w.isVisible():
+                w.show()
+            return w
+        # Build title
+        if group_key == "_markers":
+            title = "BiHome — Markers"
+        elif group_key == "_other":
+            title = "BiHome — Other"
+        else:
+            title = f"BiHome — {group_key}"
+        w = GroupPlotWindow(group_key, title)
+        self._plot_windows[group_key] = w
+        # Position: offset windows so they don't overlap on initial show
+        n = len(self._plot_windows) - 1
+        main_geo = self.frameGeometry()
+        w.move(main_geo.right() + 10 + (n * 30), main_geo.top() + (n * 30))
+        w.show()
+        return w
 
     def _add_marker_stream(self):
         """Open dialog to create a new marker stream."""
@@ -961,10 +1006,24 @@ class Viewer(QtWidgets.QMainWindow):
                 labels.append(l if l else f"ch{i}")
                 ch = ch.next_sibling()
 
+            # Extract state labels from <states> node (Marker state streams)
+            state_labels = []
+            try:
+                states_node = fi.desc().child("states")
+                if not states_node.empty():
+                    s = states_node.child("state")
+                    while not s.empty():
+                        lbl = s.child_value("label")
+                        if lbl:
+                            state_labels.append(lbl)
+                        s = s.next_sibling()
+            except Exception:
+                pass
+
             st = StreamState(
                 name=info.name(), stype=info.type(),
                 srate=info.nominal_srate(), source_id=info.source_id(),
-                ch_labels=labels, inlet=inlet,
+                ch_labels=labels, inlet=inlet, state_labels=state_labels,
             )
             new_states.append((key, st))
             print(f"[LSL] opened '{info.name()}' ({info.type()}, "
@@ -992,16 +1051,20 @@ class Viewer(QtWidgets.QMainWindow):
 
             self.streams[key] = st
 
-            # Track participant grouping
-            pid, _ = extract_participant(st.name)
-            if not pid:
-                pid = "_other"
-            if pid not in self._participant_streams:
-                self._participant_streams[pid] = []
-                self._add_participant_header(pid)
-            self._participant_streams[pid].append(key)
+            # Group assignment: markers → "_markers", participants → pid, else → "_other"
+            is_marker = (st.stype == "Markers") or st.name.startswith("Marker_")
+            if is_marker:
+                group_key = "_markers"
+            else:
+                pid, _ = extract_participant(st.name)
+                group_key = pid if pid else "_other"
 
-            self._add_stream_ui(key, st, pid)
+            if group_key not in self._participant_streams:
+                self._participant_streams[group_key] = []
+                self._add_participant_header(group_key)
+            self._participant_streams[group_key].append(key)
+
+            self._add_stream_ui(key, st, group_key)
             r = Reader(st); self.readers.append(r); r.start()
             added = True
 
@@ -1059,7 +1122,12 @@ class Viewer(QtWidgets.QMainWindow):
 
     def _add_participant_header(self, pid: str):
         """Add a participant group header to the sidebar."""
-        label = pid if pid != "_other" else "Other"
+        if pid == "_other":
+            label = "Other"
+        elif pid == "_markers":
+            label = "Markers"
+        else:
+            label = pid
         hw = QtWidgets.QWidget()
         hw.setStyleSheet(f"""
             QWidget {{
@@ -1087,23 +1155,24 @@ class Viewer(QtWidgets.QMainWindow):
 
         self.ch_lay.addWidget(hw)
 
-        # HR/HRV labels for this participant
-        hr_lbl = QtWidgets.QLabel("")
-        hr_lbl.setStyleSheet(f"""
-            font-family: 'Montserrat Bold'; font-size: 18px;
-            font-weight: bold; color: {ACCENT}; padding-left: 12px;
-        """)
-        self.ch_lay.addWidget(hr_lbl)
-        hrv_lbl = QtWidgets.QLabel("")
-        hrv_lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_DIM}; padding-left: 12px;")
-        hrv_lbl.setWordWrap(True)
-        self.ch_lay.addWidget(hrv_lbl)
+        # HR/HRV labels: only for actual participants (not Other/Markers)
+        if pid not in ("_other", "_markers"):
+            hr_lbl = QtWidgets.QLabel("")
+            hr_lbl.setStyleSheet(f"""
+                font-family: 'Montserrat Bold'; font-size: 18px;
+                font-weight: bold; color: {ACCENT}; padding-left: 12px;
+            """)
+            self.ch_lay.addWidget(hr_lbl)
+            hrv_lbl = QtWidgets.QLabel("")
+            hrv_lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_DIM}; padding-left: 12px;")
+            hrv_lbl.setWordWrap(True)
+            self.ch_lay.addWidget(hrv_lbl)
 
-        self._participant_hr[pid] = {
-            "beat_times": deque(maxlen=200),
-            "bpm": 0.0, "hrv_sdnn": 0.0, "hrv_rmssd": 0.0,
-            "hr_lbl": hr_lbl, "hrv_lbl": hrv_lbl,
-        }
+            self._participant_hr[pid] = {
+                "beat_times": deque(maxlen=200),
+                "bpm": 0.0, "hrv_sdnn": 0.0, "hrv_rmssd": 0.0,
+                "hr_lbl": hr_lbl, "hrv_lbl": hrv_lbl,
+            }
 
     def _add_stream_ui(self, key: str, st: StreamState, pid: str = ""):
         # Stream sub-header (smaller, within participant group)
@@ -1148,6 +1217,11 @@ class Viewer(QtWidgets.QMainWindow):
         cbs: List[QtWidgets.QCheckBox] = []
         ch_btns: List[QtWidgets.QPushButton] = []
 
+        # For marker streams, use the marker name (without "Marker_" prefix)
+        # as the channel button label instead of the generic "event"/"state".
+        is_marker = pid == "_markers"
+        display_name = st.name[len("Marker_"):] if (is_marker and st.name.startswith("Marker_")) else None
+
         for ci, cl in enumerate(st.ch_labels):
             rw = DraggableChannelRow(viewer=self)
             rl = QtWidgets.QHBoxLayout(rw)
@@ -1163,8 +1237,9 @@ class Viewer(QtWidgets.QMainWindow):
             grip.setCursor(QtGui.QCursor(QtCore.Qt.OpenHandCursor))
             rl.addWidget(grip)
 
-            # Toggle button
-            btn = QtWidgets.QPushButton(cl)
+            # Toggle button — use friendly name for markers
+            btn_label = display_name if display_name else cl
+            btn = QtWidgets.QPushButton(btn_label)
             btn.setCheckable(True)
             btn.setChecked(True)
             btn.setMinimumWidth(90)
@@ -1198,8 +1273,11 @@ class Viewer(QtWidgets.QMainWindow):
             self.ch_lay.addWidget(rw)
 
             row_idx = len(self.rows)
-            cr = ChRow(skey=key, ci=ci, label=f"{st.name}/{cl}", cb=cb,
-                       ys=ys, color=color, row_widget=rw)
+            # For markers, label in self.rows also uses the friendly name
+            row_label = f"{st.name}/{display_name}" if display_name else f"{st.name}/{cl}"
+            cr = ChRow(skey=key, ci=ci, label=row_label, cb=cb,
+                       ys=ys, color=color, row_widget=rw,
+                       group_key=pid, state_labels=list(st.state_labels))
             self.rows.append(cr)
             rw._ch_row = cr  # back-reference for drag & drop
             cbs.append(cb)
@@ -1281,12 +1359,24 @@ class Viewer(QtWidgets.QMainWindow):
     # ── plot management ──────────────────────────────────────────────────
 
     def _rebuild_plots(self):
-        self.pw.clear()
-        ri = 0
+        # Clear all plot windows first
+        for w in self._plot_windows.values():
+            w.pw.clear()
+
+        # Group rows by their group_key and build per-window
+        group_row_counters: Dict[str, int] = {}
+        active_groups: set = set()
+
         for cr in self.rows:
             if not cr.cb.isChecked():
                 cr.curve = cr.plot = None; cr.beat_scatter = None; continue
-            p = self.pw.addPlot(row=ri, col=0); ri += 1
+
+            group = cr.group_key or "_other"
+            active_groups.add(group)
+            win = self._get_or_create_plot_window(group)
+            ri = group_row_counters.get(group, 0)
+            group_row_counters[group] = ri + 1
+            p = win.pw.addPlot(row=ri, col=0)
 
             # Themed axis styling
             for axis_name in ('left', 'bottom'):
@@ -1300,9 +1390,19 @@ class Viewer(QtWidgets.QMainWindow):
             p.setLabel("left", short, color=GRAY, **{"font-size": "10px"})
             p.setLabel("bottom", "time (s)", color=GRAY, **{"font-size": "9px"})
             p.showGrid(x=True, y=True, alpha=0.08)
-            p.enableAutoRange(axis='y')
             p.disableAutoRange(axis='x')
             p.getAxis('left').setWidth(Y_AXIS_WIDTH)
+
+            # For state-marker streams, use state names as Y-axis tick labels
+            if cr.state_labels:
+                n = len(cr.state_labels)
+                ticks = [[(float(i), cr.state_labels[i]) for i in range(n)]]
+                p.getAxis('left').setTicks(ticks)
+                p.setYRange(-0.5, n - 0.5, padding=0)
+                p.disableAutoRange(axis='y')
+            else:
+                p.enableAutoRange(axis='y')
+
             pen = pg.mkPen(color=cr.color, width=1.2)
             cr.curve = p.plot(pen=pen, connect="finite")
             cr.curve.setClipToView(True)
@@ -1315,6 +1415,12 @@ class Viewer(QtWidgets.QMainWindow):
             else:
                 cr.beat_scatter = None
             cr.plot = p
+
+        # Hide plot windows that no longer have any visible channels
+        for gk, w in self._plot_windows.items():
+            if gk not in active_groups:
+                w.hide()
+
         self._prev_vis = [r.cb.isChecked() for r in self.rows]
 
     # ── BPM / HRV ───────────────────────────────────────────────────────
@@ -1541,7 +1647,8 @@ class Viewer(QtWidgets.QMainWindow):
                     cr.beat_scatter.setData([], [])
 
             # Y range (only on recompute to avoid jitter)
-            if recompute:
+            # Skip for state streams — fixed range set in _rebuild_plots
+            if recompute and not cr.state_labels:
                 if cr.ys.is_auto():
                     ymn = float(np.nanmin(vs_vis)) if len(vs_vis) > 0 else 0
                     ymx = float(np.nanmax(vs_vis)) if len(vs_vis) > 0 else 1
@@ -1862,6 +1969,14 @@ class Viewer(QtWidgets.QMainWindow):
             except Exception: pass
         for r in self.readers: r.stop()
         for r in self.readers: r.join(timeout=2)
+        # Force-close plot windows (they ignore closeEvent normally)
+        for w in list(self._plot_windows.values()):
+            try:
+                w.close_event_override = True
+                w.deleteLater()
+            except Exception:
+                pass
+        QtWidgets.QApplication.instance().quit()
         super().closeEvent(ev)
 
 
