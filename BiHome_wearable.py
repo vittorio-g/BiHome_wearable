@@ -2598,35 +2598,45 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
             r["label"].setText(detail)
 
     def _poll():
-        done_steps = 0
         all_streaming = True
         for name, h in healths.items():
             state, detail, _, _, first_data, err = h.snapshot()
-            # Phase 1: connect — true if we're past INIT and have a connection
-            connected = state in ("ACTIVE", "ERROR") or first_data
-            if connected:
+            r_connect = row_widgets[name]["connect"]
+            r_stream  = row_widgets[name]["stream"]
+
+            # Phase 1: connected once state was EVER ACTIVE or any data arrived.
+            # State can bounce back to CONNECTING on reconnect — the bullet
+            # stays green once set.
+            if (state == "ACTIVE") or first_data or (state == "ERROR"):
                 _set_step(name, "connect", True)
-                done_steps += 1
             else:
                 _set_step(name, "connect", False,
-                          f"{detail or state}..." if detail or state != "INIT" else "")
+                          f"{detail or state}..." if state != "INIT" else "")
+
             # Phase 2: streaming
             if first_data:
                 _set_step(name, "stream", True)
-                done_steps += 1
             else:
                 all_streaming = False
                 if state == "ERROR":
-                    r = row_widgets[name]["stream"]
-                    r["icon"].setText("✗")
-                    r["icon"].setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold;")
-                    r["label"].setText(err or "Error")
-                    r["label"].setStyleSheet(f"color: {RED}; font-size: 11px;")
-                elif connected:
+                    r_stream["icon"].setText("✗")
+                    r_stream["icon"].setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold;")
+                    r_stream["label"].setText(err or "Error")
+                    r_stream["label"].setStyleSheet(f"color: {RED}; font-size: 11px;")
+                elif r_connect["done"]:
                     _set_step(name, "stream", False, "Waiting for data...")
 
+            if not r_stream["done"]:
+                all_streaming = False
+
+        # Count steps based on done flags (cumulative — not transient)
+        done_steps = 0
+        for rows in row_widgets.values():
+            if rows["connect"]["done"]: done_steps += 1
+            if rows["stream"]["done"]:  done_steps += 1
+
         progress.setValue(done_steps)
-        if all_streaming:
+        if all_streaming and done_steps >= total_steps:
             status_lbl.setText("All devices streaming data!")
             Qc.QTimer.singleShot(600, d.accept)
         else:
