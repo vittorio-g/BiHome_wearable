@@ -4,6 +4,12 @@ Questo progetto raccoglie dati fisiologici e di movimento da più sensori eterog
 
 ---
 
+## ⚠️ TODO prioritari
+
+- **Aggiungere i numeri seriali degli EmotiBit** in `KNOWN_EMOTIBIT` dentro `BiHome_wearable.py` prima della prossima sessione che richiede gli EmotiBit. Attualmente il dizionario è vuoto e l'assegnazione EmotiBit nel wizard non può funzionare.
+
+---
+
 ## Obiettivo scientifico
 
 Il setup è progettato per un contesto sperimentale che prevede:

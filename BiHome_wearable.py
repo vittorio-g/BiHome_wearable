@@ -73,12 +73,14 @@ POLAR_LABEL_MAP = {
 # =====================================================
 
 KNOWN_POLAR = {
-    "Fascia A": "24:AC:AC:04:96:A3",
-    # "Fascia B": "XX:XX:XX:XX:XX:XX",
+    "Polar 1 (0496A33F)": "24:AC:AC:04:96:A3",
+    "Polar 2 (0493ED32)": "24:AC:AC:04:93:ED",
 }
 
 KNOWN_EMOTIBIT = {
-    # "EmotiBit Rosso": "serial_number_here",
+    # TODO: add EmotiBit serial numbers before next session
+    # "EmotiBit 1": "SNxxxxxx",
+    # "EmotiBit 2": "SNyyyyyy",
 }
 
 # =====================================================
