@@ -885,23 +885,14 @@ class Viewer(QtWidgets.QMainWindow):
         # Count how many plot windows we expect (approximate: current count)
         visible_count = max(1, len(self._plot_windows))
 
-        if screen is not None:
-            # Initial sensible size — will be re-tiled below
-            w.resize(600, 500)
-            # Re-tile all windows (including this new one) to share width
-            self._retile_plot_windows()
-        else:
-            main_geo = self.frameGeometry()
-            n = len(self._plot_windows) - 1
-            w.move(main_geo.right() + 10 + (n * 30), main_geo.top() + (n * 30))
-
+        # Show first so Qt assigns a native frame; then tile
+        w.resize(700, 500)
         w.show()
+        self._retile_plot_windows()
         return w
 
     def _retile_plot_windows(self):
-        """Re-tile all visible plot windows side-by-side along screen width.
-        Uses move() + resize() separately (not setGeometry) so the native
-        title bar is included in the window frame, not clipped off-screen."""
+        """Re-tile all plot windows side-by-side below the controller."""
         try:
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         except Exception:
@@ -909,20 +900,25 @@ class Viewer(QtWidgets.QMainWindow):
         visible = list(self._plot_windows.values())
         if not visible:
             return
+
+        # Compute top Y: below the controller window, or screen top if no room
         main_geo = self.frameGeometry()
-        # Account for typical title bar height (~30px on Windows)
-        TITLE_BAR = 35
-        top_y = main_geo.bottom() + 10 + TITLE_BAR
+        title_bar_extra = 40  # room for window title bar on Windows
+        top_y = main_geo.bottom() + 10 + title_bar_extra
+        # If controller is near the bottom, place plots at screen top instead
+        if top_y + 300 > screen.bottom():
+            top_y = screen.top() + title_bar_extra
+
         avail_w = screen.width()
-        avail_h = screen.height() - (top_y - screen.top()) - 20
+        avail_h = max(400, screen.bottom() - top_y - 20)
         n = len(visible)
-        win_w = max(450, avail_w // n) if n > 0 else 600
-        win_h = max(400, avail_h)
+        win_w = max(500, avail_w // n)
+        win_h = avail_h
+
         for i, w in enumerate(visible):
             x = screen.left() + i * win_w
-            # Resize CONTENT area, then move to include title bar
-            w.resize(win_w, win_h)
             w.move(x, top_y)
+            w.resize(win_w, win_h)
 
     def _add_marker_stream(self):
         """Open dialog to create a new marker stream."""
