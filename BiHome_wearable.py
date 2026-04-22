@@ -2246,7 +2246,34 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     spin.setStyleSheet(f"""
         QSpinBox {{
             background: #252d38; color: {TEXT}; border: 1px solid {BORDER};
-            border-radius: 6px; padding: 8px; font-size: 16px; min-width: 80px;
+            border-radius: 6px; padding: 8px 28px 8px 8px; font-size: 16px; min-width: 80px;
+        }}
+        QSpinBox::up-button {{
+            subcontrol-origin: border; subcontrol-position: top right;
+            background: #1e252e; border-left: 1px solid {BORDER};
+            border-top-right-radius: 6px;
+            width: 22px; height: 18px;
+        }}
+        QSpinBox::down-button {{
+            subcontrol-origin: border; subcontrol-position: bottom right;
+            background: #1e252e; border-left: 1px solid {BORDER};
+            border-bottom-right-radius: 6px;
+            width: 22px; height: 18px;
+        }}
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background: {ACCENT};
+        }}
+        QSpinBox::up-arrow {{
+            image: none; width: 0; height: 0;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-bottom: 6px solid {TEXT};
+        }}
+        QSpinBox::down-arrow {{
+            image: none; width: 0; height: 0;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 6px solid {TEXT};
         }}
     """)
     l1.addWidget(spin)
@@ -2352,15 +2379,21 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
 
 
 def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
-    """Show connection progress. Returns True when all connected, False if cancelled."""
-    from PyQt5 import QtWidgets as Qw, QtCore as Qc
+    """Show connection progress with per-device milestone steps.
+    Each device contributes 2 steps: detected/connecting + streaming data."""
+    from PyQt5 import QtWidgets as Qw, QtCore as Qc, QtGui as Qg
 
     app = Qw.QApplication.instance() or _setup_qt_app()
     ACCENT = "#05abc4"
+    BORDER = "#2a3340"
+    TEXT = "#e8ecf0"
+    GRAY = "#657179"
+    GREEN = "#3acc6c"
+    RED = "#e83a3a"
 
     d = Qw.QDialog()
     d.setWindowTitle("BiHome — Connecting")
-    d.setFixedSize(400, 200)
+    d.setMinimumSize(500, 400)
     lay = Qw.QVBoxLayout(d)
     lay.setContentsMargins(24, 24, 24, 24)
     lay.setSpacing(12)
@@ -2370,48 +2403,121 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
     lay.addWidget(title)
 
     status_lbl = Qw.QLabel("Connecting to devices...")
-    status_lbl.setStyleSheet("font-size: 13px;")
+    status_lbl.setStyleSheet("font-size: 13px; font-weight: bold;")
     status_lbl.setWordWrap(True)
     lay.addWidget(status_lbl)
 
+    # Progress bar: 2 steps per device (connect + stream)
+    total_steps = max(1, 2 * len(healths))
     progress = Qw.QProgressBar()
-    progress.setRange(0, len(healths))
+    progress.setRange(0, total_steps)
+    progress.setValue(0)
+    progress.setTextVisible(True)
+    progress.setFormat("%p%")
     progress.setStyleSheet(f"""
-        QProgressBar {{ border: 1px solid #2a3340; border-radius: 6px; text-align: center; background: #252d38; color: white; }}
+        QProgressBar {{
+            border: 1px solid {BORDER}; border-radius: 6px;
+            text-align: center; background: #252d38; color: {TEXT};
+            height: 22px;
+        }}
         QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
     """)
     lay.addWidget(progress)
 
+    # Scrollable checklist of device milestones
+    list_scroll = Qw.QScrollArea()
+    list_scroll.setWidgetResizable(True)
+    list_scroll.setStyleSheet(
+        f"QScrollArea {{ border: 1px solid {BORDER}; border-radius: 6px; background: #171d24; }}")
+    list_host = Qw.QWidget()
+    list_lay = Qw.QVBoxLayout(list_host)
+    list_lay.setContentsMargins(12, 10, 12, 10); list_lay.setSpacing(8)
+    list_lay.setAlignment(Qc.Qt.AlignTop)
+    list_scroll.setWidget(list_host)
+    lay.addWidget(list_scroll, stretch=1)
+
+    # Build two rows (connect, stream) per device
+    row_widgets: Dict[str, Dict[str, Qw.QLabel]] = {}
+    for name in healths:
+        dev_lbl = Qw.QLabel(f"<b>{name}</b>")
+        dev_lbl.setStyleSheet(f"color: {TEXT}; font-size: 12px;")
+        list_lay.addWidget(dev_lbl)
+        rows = {}
+        for phase, text in [("connect", "Connecting to device..."),
+                            ("stream",  "Receiving data...")]:
+            row = Qw.QWidget()
+            rl = Qw.QHBoxLayout(row); rl.setContentsMargins(16, 0, 0, 0); rl.setSpacing(8)
+            icon = Qw.QLabel("○")  # pending
+            icon.setStyleSheet(f"color: {GRAY}; font-size: 14px; font-weight: bold;")
+            icon.setFixedWidth(16)
+            label = Qw.QLabel(text)
+            label.setStyleSheet(f"color: {GRAY}; font-size: 11px;")
+            rl.addWidget(icon); rl.addWidget(label, stretch=1)
+            list_lay.addWidget(row)
+            rows[phase] = {"icon": icon, "label": label, "done": False}
+        row_widgets[name] = rows
+
     cancel_btn = Qw.QPushButton("Cancel")
+    cancel_btn.setStyleSheet(f"""
+        QPushButton {{ background: #1e252e; color: {TEXT};
+                       border: 1px solid {BORDER}; border-radius: 4px;
+                       padding: 6px 16px; }}
+        QPushButton:hover {{ border-color: {RED}; color: {RED}; }}
+    """)
     cancel_btn.clicked.connect(d.reject)
-    lay.addWidget(cancel_btn)
+    lay.addWidget(cancel_btn, alignment=Qc.Qt.AlignRight)
 
     _result = [False]
 
+    def _set_step(name, phase, done: bool, detail: str = ""):
+        r = row_widgets[name][phase]
+        if done and not r["done"]:
+            r["icon"].setText("●")
+            r["icon"].setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold;")
+            r["label"].setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+            r["done"] = True
+        if detail and not r["done"]:
+            r["label"].setText(detail)
+
     def _poll():
-        connected = 0
-        details = []
+        done_steps = 0
+        all_streaming = True
         for name, h in healths.items():
-            state, detail, _, _, first_data, _ = h.snapshot()
-            # Only count as connected when actual data has been received
-            if first_data:
-                connected += 1
-                details.append(f"{name}: streaming")
-            elif state == "ERROR":
-                details.append(f"{name}: ERROR")
-            elif state == "ACTIVE":
-                details.append(f"{name}: connected, waiting for data...")
+            state, detail, _, _, first_data, err = h.snapshot()
+            # Phase 1: connect — true if we're past INIT and have a connection
+            connected = state in ("ACTIVE", "ERROR") or first_data
+            if connected:
+                _set_step(name, "connect", True)
+                done_steps += 1
             else:
-                details.append(f"{name}: {detail or state}...")
-        progress.setValue(connected)
-        status_lbl.setText("\n".join(details))
-        if connected >= len(healths):
+                _set_step(name, "connect", False,
+                          f"{detail or state}..." if detail or state != "INIT" else "")
+            # Phase 2: streaming
+            if first_data:
+                _set_step(name, "stream", True)
+                done_steps += 1
+            else:
+                all_streaming = False
+                if state == "ERROR":
+                    r = row_widgets[name]["stream"]
+                    r["icon"].setText("✗")
+                    r["icon"].setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold;")
+                    r["label"].setText(err or "Error")
+                    r["label"].setStyleSheet(f"color: {RED}; font-size: 11px;")
+                elif connected:
+                    _set_step(name, "stream", False, "Waiting for data...")
+
+        progress.setValue(done_steps)
+        if all_streaming:
             status_lbl.setText("All devices streaming data!")
             Qc.QTimer.singleShot(600, d.accept)
+        else:
+            status_lbl.setText(f"Connecting... ({done_steps}/{total_steps} steps)")
 
     timer = Qc.QTimer()
     timer.timeout.connect(_poll)
-    timer.start(500)
+    timer.start(300)
+    _poll()  # initial paint
 
     if d.exec_() == Qw.QDialog.Accepted:
         _result[0] = True

@@ -235,16 +235,46 @@ class YScaleWidget(QtWidgets.QWidget):
 
     _SPIN_STYLE = f"""
         QDoubleSpinBox {{
-            background: {BG_INPUT}; color: {TEXT_DIM};
+            background: {BG_INPUT}; color: {TEXT_PRIMARY};
             border: 1px solid {BORDER}; border-radius: 3px;
-            padding: 2px 2px; font-size: 10px;
-            min-width: 56px; max-width: 68px;
+            padding: 2px 18px 2px 4px; font-size: 10px;
         }}
-        QDoubleSpinBox:disabled {{ color: {BORDER}; background: transparent; border-color: transparent; }}
-        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
-            background: {BG_CARD}; border: none; width: 12px;
+        QDoubleSpinBox:disabled {{ color: {GRAY}; background: transparent; border-color: {BORDER}; }}
+        QDoubleSpinBox::up-button {{
+            subcontrol-origin: border; subcontrol-position: top right;
+            background: {BG_CARD}; border-left: 1px solid {BORDER};
+            width: 14px; height: 9px;
+        }}
+        QDoubleSpinBox::down-button {{
+            subcontrol-origin: border; subcontrol-position: bottom right;
+            background: {BG_CARD}; border-left: 1px solid {BORDER};
+            width: 14px; height: 9px;
+        }}
+        QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+            background: {ACCENT_DIM};
+        }}
+        QDoubleSpinBox::up-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid {TEXT_PRIMARY};
+            width: 0; height: 0;
+        }}
+        QDoubleSpinBox::down-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid {TEXT_PRIMARY};
+            width: 0; height: 0;
+        }}
+        QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{
+            border-bottom-color: {BORDER}; border-top-color: {BORDER};
         }}
     """
+
+    # Fixed widths used both here and in the column header for alignment
+    AUTO_W = 32
+    SPIN_W = 76
 
     def __init__(self):
         super().__init__()
@@ -253,7 +283,7 @@ class YScaleWidget(QtWidgets.QWidget):
         self.auto_cb = QtWidgets.QCheckBox()
         self.auto_cb.setToolTip("Auto Y-scale")
         self.auto_cb.setChecked(True)
-        self.auto_cb.setFixedWidth(32)
+        self.auto_cb.setFixedWidth(self.AUTO_W)
         self.auto_cb.setStyleSheet(f"""
             QCheckBox {{ spacing: 0px; }}
             QCheckBox::indicator {{ width: 16px; height: 16px; }}
@@ -262,14 +292,17 @@ class YScaleWidget(QtWidgets.QWidget):
         lay.addWidget(self.auto_cb)
         self.mn = QtWidgets.QDoubleSpinBox(); self.mn.setRange(-1e9, 1e9)
         self.mn.setDecimals(1); self.mn.setValue(-1)
+        self.mn.setFixedWidth(self.SPIN_W)
         self.mn.setEnabled(False); self.mn.valueChanged.connect(self.changed)
         self.mn.setStyleSheet(self._SPIN_STYLE)
         lay.addWidget(self.mn)
         self.mx = QtWidgets.QDoubleSpinBox(); self.mx.setRange(-1e9, 1e9)
         self.mx.setDecimals(1); self.mx.setValue(1)
+        self.mx.setFixedWidth(self.SPIN_W)
         self.mx.setEnabled(False); self.mx.valueChanged.connect(self.changed)
         self.mx.setStyleSheet(self._SPIN_STYLE)
         lay.addWidget(self.mx)
+        lay.addStretch()
 
     def _toggle(self, on):
         self.mn.setEnabled(not on); self.mx.setEnabled(not on)
@@ -441,11 +474,17 @@ class MarkerConfigDialog(QtWidgets.QDialog):
         self.states_box.setVisible(False)
         self.type_state.toggled.connect(self.states_box.setVisible)
 
-        # Buttons
+        # Buttons — Create is the default so Enter triggers it (not Cancel)
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch()
-        cancel = QtWidgets.QPushButton("Cancel"); cancel.clicked.connect(self.reject)
-        create = QtWidgets.QPushButton("Create"); create.clicked.connect(self._on_create)
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        cancel.setAutoDefault(False)
+        cancel.setDefault(False)
+        create = QtWidgets.QPushButton("Create")
+        create.clicked.connect(self._on_create)
+        create.setAutoDefault(True)
+        create.setDefault(True)
         create.setStyleSheet(f"""
             QPushButton {{ background: {ACCENT}; color: white; border: none;
                            border-radius: 4px; padding: 5px 16px; font-weight: bold; }}
@@ -453,6 +492,8 @@ class MarkerConfigDialog(QtWidgets.QDialog):
         """)
         btns.addWidget(cancel); btns.addWidget(create)
         lay.addLayout(btns)
+        # Focus starts on name field
+        self.name_edit.setFocus()
 
     def _on_create(self):
         if not self.name_edit.text().strip():
@@ -661,15 +702,37 @@ class Viewer(QtWidgets.QMainWindow):
         side.setObjectName("sidebar")
         side.setStyleSheet(f"#sidebar {{ background: {BG_PANEL}; }}")
 
-        # Outer horizontal layout: three columns
-        outer = QtWidgets.QHBoxLayout(side)
-        outer.setContentsMargins(16, 16, 16, 12)
-        outer.setSpacing(16)
+        # Outer layout: top row (controls + markers) over bottom (streams)
+        # Using QSplitter everywhere so the user can resize all three panes.
+        outer = QtWidgets.QVBoxLayout(side)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(0)
 
-        # ── Column 1: Controls (fixed narrow width) ──
+        splitter_style = f"""
+            QSplitter::handle {{
+                background: {BORDER};
+            }}
+            QSplitter::handle:horizontal {{ width: 4px; }}
+            QSplitter::handle:vertical   {{ height: 4px; }}
+            QSplitter::handle:hover {{ background: {ACCENT}; }}
+        """
+
+        # Main vertical splitter: top row vs. streams
+        main_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        main_split.setStyleSheet(splitter_style)
+        main_split.setHandleWidth(4)
+        outer.addWidget(main_split)
+
+        # Top splitter: controls | markers
+        top_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        top_split.setStyleSheet(splitter_style)
+        top_split.setHandleWidth(4)
+        main_split.addWidget(top_split)
+
+        # ── Column 1: Controls ──
         col1 = QtWidgets.QVBoxLayout(); col1.setSpacing(8)
         col1_w = QtWidgets.QWidget(); col1_w.setLayout(col1)
-        col1_w.setFixedWidth(260)
+        col1_w.setMinimumWidth(240)
 
         logo = QtWidgets.QLabel("BiHome")
         logo.setStyleSheet(f"""
@@ -711,10 +774,32 @@ class Viewer(QtWidgets.QMainWindow):
             QDoubleSpinBox {{
                 background: {BG_INPUT}; color: {TEXT_PRIMARY};
                 border: 1px solid {BORDER}; border-radius: 4px;
-                padding: 3px 6px; font-size: 12px;
+                padding: 3px 22px 3px 6px; font-size: 12px;
             }}
-            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
-                background: {BG_CARD}; border: none; width: 16px;
+            QDoubleSpinBox::up-button {{
+                subcontrol-origin: border; subcontrol-position: top right;
+                background: {BG_CARD}; border-left: 1px solid {BORDER};
+                width: 18px; height: 11px;
+            }}
+            QDoubleSpinBox::down-button {{
+                subcontrol-origin: border; subcontrol-position: bottom right;
+                background: {BG_CARD}; border-left: 1px solid {BORDER};
+                width: 18px; height: 11px;
+            }}
+            QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+                background: {ACCENT_DIM};
+            }}
+            QDoubleSpinBox::up-arrow {{
+                image: none; width: 0; height: 0;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-bottom: 6px solid {TEXT_PRIMARY};
+            }}
+            QDoubleSpinBox::down-arrow {{
+                image: none; width: 0; height: 0;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid {TEXT_PRIMARY};
             }}
         """)
         tw.addWidget(self.win_spin)
@@ -773,7 +858,7 @@ class Viewer(QtWidgets.QMainWindow):
         col1.addWidget(self.delay_lbl)
 
         col1.addStretch()
-        outer.addWidget(col1_w)
+        top_split.addWidget(col1_w)
 
         # ── Column 2: Streams (wide, scrollable) ──
         col2 = QtWidgets.QVBoxLayout(); col2.setSpacing(8)
@@ -807,12 +892,13 @@ class Viewer(QtWidgets.QMainWindow):
         self.ch_lay.setContentsMargins(0, 0, 0, 0)
         scr.setWidget(self.ch_widget)
         col2.addWidget(scr, stretch=1)
-        outer.addWidget(col2_w, stretch=2)
+        # Streams goes to BOTTOM of main_split (spans whole width)
+        main_split.addWidget(col2_w)
 
-        # ── Column 3: Markers (fixed width, scrollable) ──
+        # ── Column 3: Markers (resizable in top splitter) ──
         col3 = QtWidgets.QVBoxLayout(); col3.setSpacing(8)
         col3_w = QtWidgets.QWidget(); col3_w.setLayout(col3)
-        col3_w.setFixedWidth(260)
+        col3_w.setMinimumWidth(240)
 
         mk_hdr_row = QtWidgets.QHBoxLayout()
         sec_mk = QtWidgets.QLabel("MARKERS")
@@ -841,7 +927,11 @@ class Viewer(QtWidgets.QMainWindow):
         self.mk_lay.setContentsMargins(0, 0, 0, 0)
         mk_scr.setWidget(self.mk_widget)
         col3.addWidget(mk_scr, stretch=1)
-        outer.addWidget(col3_w)
+        top_split.addWidget(col3_w)
+
+        # Set initial splitter proportions
+        top_split.setSizes([300, 800])      # controls | markers
+        main_split.setSizes([400, 400])     # top row | streams
 
         # Marker state
         self.markers: List[MarkerStream] = []
@@ -850,8 +940,7 @@ class Viewer(QtWidgets.QMainWindow):
         # Main window hosts only the sidebar (controls). Plot windows are
         # created separately per participant / markers group.
         self.setCentralWidget(side)
-        # Wider controller: 3-column horizontal layout
-        self.resize(1100, 600)
+        self.resize(1200, 800)
         self.setWindowTitle("BiHome Controller")
 
         # group_key → GroupPlotWindow
@@ -1313,20 +1402,35 @@ class Viewer(QtWidgets.QMainWindow):
             self._stream_rec_cbs[key] = self._participant_rec_cbs[pid]
         self.ch_lay.addWidget(hw)
 
-        # Column headers (inside scroll area, moves with content)
+        # Column headers — widths match the row layout:
+        #   [grip 16px] [padding 4px] [toggle plot btn N] [spacing 4] [auto 32] [min 76] [max 76]
         hdr = QtWidgets.QWidget()
         hdr_l = QtWidgets.QHBoxLayout(hdr)
-        hdr_l.setContentsMargins(24, 4, 4, 0); hdr_l.setSpacing(4)
-        self._hdr_ch_lbl = QtWidgets.QLabel("channel")
-        self._hdr_ch_lbl.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
+        hdr_l.setContentsMargins(0, 4, 4, 0); hdr_l.setSpacing(4)
+
+        hdr_style = f"color: {GRAY}; font-size: 9px; font-weight: bold; letter-spacing: 1px;"
+
+        # Grip spacer (matches grip column width of ~16px + pad)
+        grip_spacer = QtWidgets.QLabel("")
+        grip_spacer.setFixedWidth(24)
+        hdr_l.addWidget(grip_spacer)
+
+        # Toggle plot header (matches the colored toggle button column)
+        self._hdr_ch_lbl = QtWidgets.QLabel("TOGGLE PLOT")
+        self._hdr_ch_lbl.setStyleSheet(hdr_style)
+        self._hdr_ch_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self._hdr_ch_lbl.setMinimumWidth(90)
         hdr_l.addWidget(self._hdr_ch_lbl)
-        for h in ("auto", "min", "max"):
-            hl2 = QtWidgets.QLabel(h)
-            hl2.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
-            hl2.setAlignment(QtCore.Qt.AlignCenter)
-            hl2.setFixedWidth(32 if h == "auto" else 56)
-            hdr_l.addWidget(hl2)
+
+        # Auto / min / max (match YScaleWidget fixed widths)
+        for txt, w in (("AUTO", YScaleWidget.AUTO_W),
+                       ("MIN",  YScaleWidget.SPIN_W),
+                       ("MAX",  YScaleWidget.SPIN_W)):
+            lbl = QtWidgets.QLabel(txt)
+            lbl.setStyleSheet(hdr_style)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setFixedWidth(w)
+            hdr_l.addWidget(lbl)
         hdr_l.addStretch()
         self.ch_lay.addWidget(hdr)
 
@@ -1348,6 +1452,7 @@ class Viewer(QtWidgets.QMainWindow):
             rw = DraggableChannelRow(viewer=self)
             rl = QtWidgets.QHBoxLayout(rw)
             rl.setContentsMargins(0, 1, 4, 1); rl.setSpacing(4)
+            # Grip column fixed width matching the column header spacer
             # Channel color: same across participants for same label
             # e.g. 'ecg' is always teal, 'ax' is always orange, etc.
             color_key = cl.lower() if cl else f"ch{ci}"
@@ -1356,12 +1461,11 @@ class Viewer(QtWidgets.QMainWindow):
                 self._color_idx += 1
             color = self._label_colors[color_key]
 
-            # Drag handle
+            # Drag handle — fixed 20px so the column aligns with the header
             grip = QtWidgets.QLabel("\u2630")  # ☰ hamburger
-            grip.setStyleSheet(f"""
-                color: {GRAY}; font-size: 12px;
-                padding: 0 4px; min-width: 16px;
-            """)
+            grip.setFixedWidth(20)
+            grip.setAlignment(QtCore.Qt.AlignCenter)
+            grip.setStyleSheet(f"color: {GRAY}; font-size: 12px;")
             grip.setCursor(QtGui.QCursor(QtCore.Qt.OpenHandCursor))
             rl.addWidget(grip)
 
@@ -1457,20 +1561,26 @@ class Viewer(QtWidgets.QMainWindow):
                     rec_cb.setParent(None)
                     hl.addWidget(rec_cb)
                 self.ch_lay.addWidget(hw)
-                # Column header
+                # Column header (same layout as _add_stream_ui)
                 hdr = QtWidgets.QWidget()
                 hdr_l = QtWidgets.QHBoxLayout(hdr)
-                hdr_l.setContentsMargins(22, 4, 4, 0); hdr_l.setSpacing(4)
-                hdr_ch = QtWidgets.QLabel("channel")
-                hdr_ch.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
+                hdr_l.setContentsMargins(0, 4, 4, 0); hdr_l.setSpacing(4)
+                hdr_style_inner = f"color: {GRAY}; font-size: 9px; font-weight: bold; letter-spacing: 1px;"
+                grip_sp = QtWidgets.QLabel(""); grip_sp.setFixedWidth(24)
+                hdr_l.addWidget(grip_sp)
+                hdr_ch = QtWidgets.QLabel("TOGGLE PLOT")
+                hdr_ch.setStyleSheet(hdr_style_inner)
+                hdr_ch.setAlignment(QtCore.Qt.AlignCenter)
                 hdr_ch.setMinimumWidth(90)
                 hdr_l.addWidget(hdr_ch)
-                for h in ("auto", "min", "max"):
-                    hl2 = QtWidgets.QLabel(h)
-                    hl2.setStyleSheet(f"color: {GRAY}; font-size: 9px;")
-                    hl2.setAlignment(QtCore.Qt.AlignCenter)
-                    hl2.setFixedWidth(32 if h == "auto" else 56)
-                    hdr_l.addWidget(hl2)
+                for txt, w in (("AUTO", YScaleWidget.AUTO_W),
+                               ("MIN",  YScaleWidget.SPIN_W),
+                               ("MAX",  YScaleWidget.SPIN_W)):
+                    lbl = QtWidgets.QLabel(txt)
+                    lbl.setStyleSheet(hdr_style_inner)
+                    lbl.setAlignment(QtCore.Qt.AlignCenter)
+                    lbl.setFixedWidth(w)
+                    hdr_l.addWidget(lbl)
                 hdr_l.addStretch()
                 self.ch_lay.addWidget(hdr)
 
@@ -2148,7 +2258,17 @@ def main():
     # Global font
     app.setFont(QtGui.QFont("Montserrat", 10))
 
-    v = Viewer(); v.show()
+    v = Viewer()
+    # Center controller on primary screen so the title bar is visible
+    try:
+        scr = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        fg = v.frameGeometry() if v.frameGeometry().isValid() else v.geometry()
+        x = scr.left() + max(0, (scr.width() - v.width()) // 2)
+        y = scr.top() + 40  # leave room for title bar
+        v.move(x, y)
+    except Exception:
+        pass
+    v.show()
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
