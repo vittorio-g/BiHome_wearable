@@ -39,7 +39,9 @@ args = [
     "--clean",
     "--name", "BiHome Wearable",
     "--icon", icon_path,
-    "--windowed",                          # no console window on launch
+    # Temporarily keep console visible to debug BLE connection issues.
+    # Change to "--windowed" once stable for a clean user experience.
+    "--console",
     "--onedir",                            # bundle dependencies in a folder
     # Embed the viewer script + Viewer assets so subprocess can find them
     "--add-data", f"{os.path.join(HERE, 'Viewer')}{os.pathsep}Viewer",
