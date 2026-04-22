@@ -78,9 +78,8 @@ KNOWN_POLAR = {
 }
 
 KNOWN_EMOTIBIT = {
-    # TODO: add EmotiBit serial numbers before next session
-    # "EmotiBit 1": "SNxxxxxx",
-    # "EmotiBit 2": "SNyyyyyy",
+    "EmotiBit 1 (MD-V6-0000089)": "MD-V6-0000089",
+    "EmotiBit 2 (MD-V6-0000482)": "MD-V6-0000482",
 }
 
 # =====================================================
