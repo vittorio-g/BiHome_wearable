@@ -886,19 +886,9 @@ class Viewer(QtWidgets.QMainWindow):
         visible_count = max(1, len(self._plot_windows))
 
         if screen is not None:
-            main_geo = self.frameGeometry()
-            top_y = main_geo.bottom() + 10
-            avail_w = screen.width()
-            avail_h = screen.height() - (top_y - screen.top()) - 20
-            # Each window gets avail_w / visible_count
-            win_w = max(450, avail_w // max(visible_count, 2))
-            win_h = max(400, avail_h)
-            n = len(self._plot_windows) - 1
-            x = screen.left() + n * win_w
-            if x + win_w > screen.right():
-                x = screen.left() + (n % max(visible_count, 1)) * win_w
-            w.setGeometry(x, top_y, win_w, win_h)
-            # Re-tile all existing windows so they remain equally sized
+            # Initial sensible size — will be re-tiled below
+            w.resize(600, 500)
+            # Re-tile all windows (including this new one) to share width
             self._retile_plot_windows()
         else:
             main_geo = self.frameGeometry()
@@ -909,16 +899,20 @@ class Viewer(QtWidgets.QMainWindow):
         return w
 
     def _retile_plot_windows(self):
-        """Re-tile all visible plot windows side-by-side along screen width."""
+        """Re-tile all visible plot windows side-by-side along screen width.
+        Uses move() + resize() separately (not setGeometry) so the native
+        title bar is included in the window frame, not clipped off-screen."""
         try:
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         except Exception:
             return
-        visible = [w for w in self._plot_windows.values() if w.isVisible() or True]
+        visible = list(self._plot_windows.values())
         if not visible:
             return
         main_geo = self.frameGeometry()
-        top_y = main_geo.bottom() + 10
+        # Account for typical title bar height (~30px on Windows)
+        TITLE_BAR = 35
+        top_y = main_geo.bottom() + 10 + TITLE_BAR
         avail_w = screen.width()
         avail_h = screen.height() - (top_y - screen.top()) - 20
         n = len(visible)
@@ -926,7 +920,9 @@ class Viewer(QtWidgets.QMainWindow):
         win_h = max(400, avail_h)
         for i, w in enumerate(visible):
             x = screen.left() + i * win_w
-            w.setGeometry(x, top_y, win_w, win_h)
+            # Resize CONTENT area, then move to include title bar
+            w.resize(win_w, win_h)
+            w.move(x, top_y)
 
     def _add_marker_stream(self):
         """Open dialog to create a new marker stream."""
