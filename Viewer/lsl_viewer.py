@@ -278,6 +278,156 @@ class YScaleWidget(QtWidgets.QWidget):
     def manual(self): return self.mn.value(), self.mx.value()
 
 
+# ── Marker streams ───────────────────────────────────────────────────────────
+
+class MarkerStream:
+    """An LSL outlet that publishes marker/state values at a fixed rate.
+
+    type='event': current_value is 1.0 for one publish cycle after trigger(),
+                  then resets to 0.0.
+    type='state': current_value is the selected state index (0..N-1).
+                  changes via set_state(idx).
+
+    Runs a background thread pushing samples at RATE Hz, so markers appear
+    aligned with viewer time axis and can be recorded by LabRecorder.
+    """
+    RATE = 20.0  # 20 Hz — same as viewer framerate
+
+    def __init__(self, name: str, stream_type: str, states: List[str] = None):
+        self.name = name
+        self.type = stream_type  # 'event' or 'state'
+        self.states = list(states) if states else []
+        self._current = 0.0
+        self._pulse_pending = False  # for 'event' — fire one sample of 1.0
+        self._stop = threading.Event()
+
+        ch_label = "event" if stream_type == "event" else "state"
+        info = pylsl.StreamInfo(
+            name=f"Marker_{name}",
+            type="Markers",
+            channel_count=1,
+            nominal_srate=self.RATE,
+            channel_format="float32",
+            source_id=f"marker_{name}_{int(time.time())}",
+        )
+        try:
+            chns = info.desc().append_child("channels")
+            ch = chns.append_child("channel")
+            ch.append_child_value("label", ch_label)
+            # Save state names in the XML so consumers can decode the values
+            if stream_type == "state" and self.states:
+                states_node = info.desc().append_child("states")
+                for i, s in enumerate(self.states):
+                    sn = states_node.append_child("state")
+                    sn.append_child_value("index", str(i))
+                    sn.append_child_value("label", s)
+        except Exception:
+            pass
+        self.outlet = pylsl.StreamOutlet(info)
+
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        period = 1.0 / self.RATE
+        while not self._stop.is_set():
+            try:
+                val = 1.0 if (self.type == "event" and self._pulse_pending) else self._current
+                self.outlet.push_sample([float(val)])
+                if self._pulse_pending:
+                    self._pulse_pending = False
+            except Exception:
+                pass
+            time.sleep(period)
+
+    def trigger(self):
+        """For 'event' streams: fire a single 1.0 sample."""
+        self._pulse_pending = True
+
+    def set_state(self, idx: int):
+        """For 'state' streams: set the current state index."""
+        if 0 <= idx < max(1, len(self.states)):
+            self._current = float(idx)
+
+    def stop(self):
+        self._stop.set()
+
+
+class MarkerConfigDialog(QtWidgets.QDialog):
+    """Dialog to configure a new marker stream."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Marker Stream")
+        self.setMinimumWidth(400)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16); lay.setSpacing(10)
+
+        title = QtWidgets.QLabel("New Marker Stream")
+        title.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {ACCENT};")
+        lay.addWidget(title)
+
+        # Name
+        lay.addWidget(QtWidgets.QLabel("Name:"))
+        self.name_edit = QtWidgets.QLineEdit()
+        self.name_edit.setPlaceholderText("e.g. Stimulus, Task, Condition")
+        self.name_edit.setStyleSheet(
+            f"QLineEdit {{ background: {BG_INPUT}; color: {TEXT_PRIMARY}; "
+            f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
+        lay.addWidget(self.name_edit)
+
+        # Type
+        lay.addWidget(QtWidgets.QLabel("Type:"))
+        self.type_group = QtWidgets.QButtonGroup(self)
+        self.type_event = QtWidgets.QRadioButton("Event (single marker each press)")
+        self.type_event.setChecked(True)
+        self.type_state = QtWidgets.QRadioButton("State (switch between named states)")
+        self.type_group.addButton(self.type_event, 0)
+        self.type_group.addButton(self.type_state, 1)
+        lay.addWidget(self.type_event)
+        lay.addWidget(self.type_state)
+
+        # States list (shown only if state type)
+        self.states_box = QtWidgets.QWidget()
+        sl = QtWidgets.QVBoxLayout(self.states_box)
+        sl.setContentsMargins(12, 4, 0, 4); sl.setSpacing(4)
+        sl.addWidget(QtWidgets.QLabel("States (one per line):"))
+        self.states_edit = QtWidgets.QPlainTextEdit("rest\nactivity\ncontrol")
+        self.states_edit.setStyleSheet(
+            f"QPlainTextEdit {{ background: {BG_INPUT}; color: {TEXT_PRIMARY}; "
+            f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
+        self.states_edit.setFixedHeight(80)
+        sl.addWidget(self.states_edit)
+        lay.addWidget(self.states_box)
+        self.states_box.setVisible(False)
+        self.type_state.toggled.connect(self.states_box.setVisible)
+
+        # Buttons
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch()
+        cancel = QtWidgets.QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        create = QtWidgets.QPushButton("Create"); create.clicked.connect(self._on_create)
+        create.setStyleSheet(f"""
+            QPushButton {{ background: {ACCENT}; color: white; border: none;
+                           border-radius: 4px; padding: 5px 16px; font-weight: bold; }}
+            QPushButton:hover {{ background: {ACCENT_DIM}; }}
+        """)
+        btns.addWidget(cancel); btns.addWidget(create)
+        lay.addLayout(btns)
+
+    def _on_create(self):
+        if not self.name_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "Missing name", "Please enter a name.")
+            return
+        self.accept()
+
+    def get_result(self):
+        return {
+            "name": self.name_edit.text().strip().replace(" ", "_"),
+            "type": "event" if self.type_event.isChecked() else "state",
+            "states": [s.strip() for s in self.states_edit.toPlainText().splitlines() if s.strip()],
+        }
+
+
 _PID_RE = re.compile(r'^(P\d{2})_')
 
 def extract_participant(stream_name: str) -> Tuple[str, str]:
@@ -400,6 +550,12 @@ class Viewer(QtWidgets.QMainWindow):
         self._participant_streams: Dict[str, List[str]] = {}
         # Maps participant_id → REC checkbox widget
         self._participant_rec_cbs: Dict[str, QtWidgets.QCheckBox] = {}
+        # Battery levels: "P01_Polar1" → (pct, last_update_ts)
+        self._battery: Dict[str, Tuple[float, float]] = {}
+        # Stream header labels (for updating battery text): stream_key → QLabel
+        self._stream_header_lbls: Dict[str, QtWidgets.QLabel] = {}
+        # Battery reader threads (one per battery stream)
+        self._battery_readers: List[Reader] = []
 
         self._build_ui()
         self._load_settings()
@@ -578,6 +734,43 @@ class Viewer(QtWidgets.QMainWindow):
         self.ch_lay.setContentsMargins(0, 0, 0, 0)
         scr.setWidget(self.ch_widget)
         sl.addWidget(scr, stretch=1)
+
+        # ── MARKERS section ──
+        sl.addWidget(self._sep())
+        mk_hdr_row = QtWidgets.QHBoxLayout()
+        sec_mk = QtWidgets.QLabel("MARKERS")
+        sec_mk.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold; letter-spacing: 2px;")
+        mk_hdr_row.addWidget(sec_mk, stretch=1)
+        add_mk_btn = QtWidgets.QPushButton("+ New")
+        self._style_btn(add_mk_btn, small=True)
+        add_mk_btn.clicked.connect(self._add_marker_stream)
+        mk_hdr_row.addWidget(add_mk_btn)
+        sl.addLayout(mk_hdr_row)
+
+        # Scrollable markers area (smaller than streams)
+        mk_scr = QtWidgets.QScrollArea()
+        mk_scr.setWidgetResizable(True)
+        mk_scr.setMaximumHeight(220)
+        mk_scr.setStyleSheet(f"""
+            QScrollArea {{ border: none; background: transparent; }}
+            QScrollBar:vertical {{ background: {BG_PANEL}; width: 6px; margin: 0; }}
+            QScrollBar::handle:vertical {{
+                background: {BORDER}; border-radius: 3px; min-height: 20px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        """)
+        self.mk_widget = QtWidgets.QWidget()
+        self.mk_lay = QtWidgets.QVBoxLayout(self.mk_widget)
+        self.mk_lay.setAlignment(QtCore.Qt.AlignTop)
+        self.mk_lay.setSpacing(4)
+        self.mk_lay.setContentsMargins(0, 0, 0, 0)
+        mk_scr.setWidget(self.mk_widget)
+        sl.addWidget(mk_scr)
+
+        # Marker state
+        self.markers: List[MarkerStream] = []
+        self.marker_widgets: List[QtWidgets.QWidget] = []
+
         sp.addWidget(side)
 
         self.pw = pg.GraphicsLayoutWidget()
@@ -585,6 +778,107 @@ class Viewer(QtWidgets.QMainWindow):
         sp.addWidget(self.pw)
         sp.setStretchFactor(0, 0); sp.setStretchFactor(1, 1)
         sp.setSizes([320, 1080])
+
+    def _add_marker_stream(self):
+        """Open dialog to create a new marker stream."""
+        d = MarkerConfigDialog(self)
+        if d.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        cfg = d.get_result()
+        try:
+            m = MarkerStream(cfg["name"], cfg["type"], cfg.get("states"))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Cannot create marker: {e}")
+            return
+        self.markers.append(m)
+        self._create_marker_widget(m)
+
+    def _create_marker_widget(self, m: MarkerStream):
+        """Build the UI card for a marker stream."""
+        card = QtWidgets.QWidget()
+        card.setStyleSheet(f"QWidget {{ background: {BG_CARD}; border-radius: 6px; }}")
+        lay = QtWidgets.QVBoxLayout(card)
+        lay.setContentsMargins(10, 6, 10, 6); lay.setSpacing(4)
+
+        # Header row: name + remove button
+        hdr = QtWidgets.QHBoxLayout()
+        name_lbl = QtWidgets.QLabel(
+            f"<span style='color:{TEXT_PRIMARY}; font-weight:600;'>{m.name}</span>"
+            f" <span style='color:{GRAY}; font-size:9px;'>[{m.type}]</span>")
+        hdr.addWidget(name_lbl, stretch=1)
+        rm_btn = QtWidgets.QPushButton("×")
+        rm_btn.setFixedSize(20, 20)
+        rm_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {GRAY};
+                           border: none; font-size: 14px; font-weight: bold; }}
+            QPushButton:hover {{ color: {RED_REC}; }}
+        """)
+        rm_btn.clicked.connect(lambda _, m=m, c=card: self._remove_marker(m, c))
+        hdr.addWidget(rm_btn)
+        lay.addLayout(hdr)
+
+        # Buttons row
+        if m.type == "event":
+            fire_btn = QtWidgets.QPushButton("● TRIGGER")
+            fire_btn.setStyleSheet(f"""
+                QPushButton {{ background: rgba(232,58,58,0.15); color: {RED_REC};
+                               border: 1px solid {RED_REC}; border-radius: 4px;
+                               padding: 6px; font-weight: bold; font-size: 12px; }}
+                QPushButton:hover {{ background: rgba(232,58,58,0.30); }}
+                QPushButton:pressed {{ background: {RED_REC}; color: white; }}
+            """)
+            fire_btn.clicked.connect(lambda _, m=m: m.trigger())
+            lay.addWidget(fire_btn)
+        else:  # state
+            btn_row = QtWidgets.QHBoxLayout()
+            btn_row.setSpacing(4)
+            state_btns: List[QtWidgets.QPushButton] = []
+            def make_handler(idx, btns):
+                def _handler(_):
+                    m.set_state(idx)
+                    for i, b in enumerate(btns):
+                        b.setChecked(i == idx)
+                return _handler
+            for i, s in enumerate(m.states):
+                b = QtWidgets.QPushButton(s)
+                b.setCheckable(True)
+                b.setChecked(i == 0)
+                b.setStyleSheet(f"""
+                    QPushButton {{ background: {BG_INPUT}; color: {GRAY};
+                                   border: 1px solid {BORDER}; border-radius: 4px;
+                                   padding: 4px 8px; font-size: 11px; }}
+                    QPushButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}
+                    QPushButton:checked {{ background: rgba(5,171,196,0.20);
+                                          color: {ACCENT}; border-color: {ACCENT};
+                                          font-weight: bold; }}
+                """)
+                state_btns.append(b)
+                btn_row.addWidget(b)
+            # Connect with proper closure
+            for i, b in enumerate(state_btns):
+                b.clicked.connect(make_handler(i, state_btns))
+            lay.addLayout(btn_row)
+            # Set initial state to 0
+            m.set_state(0)
+
+        self.mk_lay.addWidget(card)
+        self.marker_widgets.append(card)
+
+    def _remove_marker(self, m: MarkerStream, card: QtWidgets.QWidget):
+        try:
+            m.stop()
+        except Exception:
+            pass
+        try:
+            self.markers.remove(m)
+        except ValueError:
+            pass
+        try:
+            self.marker_widgets.remove(card)
+        except ValueError:
+            pass
+        card.setParent(None)
+        card.deleteLater()
 
     def _toggle_all_channels(self):
         """Toggle visibility of all channels across all streams."""
@@ -690,6 +984,12 @@ class Viewer(QtWidgets.QMainWindow):
         for key, st in pending:
             if key in self.streams:
                 continue
+
+            # Battery streams: not shown as channels, just read the value
+            if st.stype == "Battery" or st.name.endswith("_Battery"):
+                self._start_battery_reader(key, st)
+                continue
+
             self.streams[key] = st
 
             # Track participant grouping
@@ -708,6 +1008,54 @@ class Viewer(QtWidgets.QMainWindow):
         if added:
             self._apply_stream_settings()
             self._rebuild_plots()
+
+    def _refresh_stream_header(self, key: str, st: 'StreamState'):
+        """Update a stream header label to show name + channel info + battery."""
+        lbl = self._stream_header_lbls.get(key)
+        if lbl is None:
+            return
+        _, short = extract_participant(st.name)
+        # Battery lookup
+        device_key = self._device_key_for_stream(st.name)
+        batt_txt = ""
+        if device_key in self._battery:
+            pct, ts_upd = self._battery[device_key]
+            # Color: red <20, yellow <50, green otherwise
+            col = "#3acc6c" if pct >= 50 else ("#f0c040" if pct >= 20 else "#e83a3a")
+            batt_txt = (f"  <span style='color:{col}; font-size:9px; font-weight:bold;'>"
+                        f"🔋 {pct:.0f}%</span>")
+        lbl.setText(
+            f"<span style='color:{TEXT_PRIMARY}; font-size:12px; font-weight:600;'>"
+            f"{short}</span>"
+            f"  <span style='color:{GRAY}; font-size:9px;'>"
+            f"{st.srate:.0f} Hz | {len(st.ch_labels)} ch</span>"
+            f"{batt_txt}")
+
+    def _start_battery_reader(self, key: str, st: StreamState):
+        """Start a lightweight thread that reads battery samples and stores
+        the latest value keyed by 'P01_Polar1' (strip _Battery suffix)."""
+        device_key = st.name[:-len("_Battery")] if st.name.endswith("_Battery") else st.name
+
+        def _run():
+            inlet = st.inlet
+            while True:
+                try:
+                    samples, ts = inlet.pull_chunk(timeout=0.5, max_samples=10)
+                except Exception:
+                    break
+                if samples:
+                    pct = float(samples[-1][0])
+                    self._battery[device_key] = (pct, time.time())
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+    def _device_key_for_stream(self, stream_name: str) -> str:
+        """Extract 'P01_Polar1' from 'P01_Polar1' or 'P01_Polar1_IMU' etc."""
+        # Strip known suffixes
+        for suffix in ("_IMU", "_PPG", "_EDA_TEMP"):
+            if stream_name.endswith(suffix):
+                return stream_name[:-len(suffix)]
+        return stream_name
 
     def _add_participant_header(self, pid: str):
         """Add a participant group header to the sidebar."""
@@ -764,11 +1112,11 @@ class Viewer(QtWidgets.QMainWindow):
         hw.setStyleSheet(f"QWidget {{ background: {BG_CARD}; border-radius: 4px; }}")
         hl = QtWidgets.QHBoxLayout(hw)
         hl.setContentsMargins(12, 4, 12, 4)
-        lbl = QtWidgets.QLabel(
-            f"<span style='color:{TEXT_PRIMARY}; font-size:12px; font-weight:600;'>"
-            f"{short_name}</span>"
-            f"  <span style='color:{GRAY}; font-size:9px;'>"
-            f"{st.srate:.0f} Hz | {len(st.ch_labels)} ch</span>")
+        lbl = QtWidgets.QLabel()
+        lbl.setTextFormat(QtCore.Qt.RichText)
+        # Build initial label (no battery yet)
+        self._stream_header_lbls[key] = lbl
+        self._refresh_stream_header(key, st)
         hl.addWidget(lbl, stretch=1)
         # REC is now at participant level, so no per-stream checkbox needed
         # But keep _stream_rec_cbs for backward compat with recording code
@@ -1066,6 +1414,10 @@ class Viewer(QtWidgets.QMainWindow):
         if recompute:
             self.delay_lbl.setText(
                 "Delays: " + ("  |  ".join(parts) if parts else "--"))
+
+            # Update stream header labels (battery, channel info)
+            for key, st in self.streams.items():
+                self._refresh_stream_header(key, st)
 
             # BPM/HRV per participant
             t_min_hr = now - 60.0
@@ -1505,6 +1857,9 @@ class Viewer(QtWidgets.QMainWindow):
         self._save_settings()
         if self._rec_proc is not None:
             self._stop_recording()
+        for m in self.markers:
+            try: m.stop()
+            except Exception: pass
         for r in self.readers: r.stop()
         for r in self.readers: r.join(timeout=2)
         super().closeEvent(ev)

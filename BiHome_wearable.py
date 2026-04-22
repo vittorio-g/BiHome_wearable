@@ -72,40 +72,60 @@ POLAR_LABEL_MAP = {
 # Known devices registry — friendly name → address/serial
 # =====================================================
 
+# Short friendly name → (address/serial, long description)
+# Short names are used in LSL stream names and in the viewer UI.
 KNOWN_POLAR = {
-    "Polar 1 (0496A33F)": "24:AC:AC:04:96:A3",
-    "Polar 2 (0493ED32)": "24:AC:AC:04:93:ED",
+    "Polar 1":    ("24:AC:AC:04:96:A3", "0496A33F"),
+    "Polar 2":    ("24:AC:AC:04:93:ED", "0493ED32"),
 }
 
 KNOWN_EMOTIBIT = {
-    "EmotiBit 1 (MD-V6-0000089)": "MD-V6-0000089",
-    "EmotiBit 2 (MD-V6-0000482)": "MD-V6-0000482",
+    "EmotiBit 1": ("MD-V6-0000089", ""),
+    "EmotiBit 2": ("MD-V6-0000482", ""),
 }
 
 # =====================================================
 # Multi-participant helpers
 # =====================================================
 
-def make_polar_label_map(participant_id: str) -> dict:
-    """Generate Polar label_map with participant prefix in stream names."""
-    prefix = f"{participant_id}_"
+def _safe(s: str) -> str:
+    """Make a string safe for LSL identifiers (remove spaces)."""
+    return s.replace(" ", "")
+
+def make_polar_label_map(participant_id: str, device_name: str = "Polar") -> dict:
+    """Generate Polar label_map with participant + device name in stream names.
+    E.g. participant_id='P01', device_name='Polar 1' → 'P01_Polar1'."""
+    safe_dev = _safe(device_name)
+    prefix = f"{participant_id}_{safe_dev}"
     return {
-        "Sens": (f"{prefix}PolarH10_Sens", ["ecg", "ax", "ay", "az", "beat"], 130.0),
+        "Sens": (prefix, ["ecg", "ax", "ay", "az", "beat"], 130.0),
     }
 
-def make_emotibit_stream_names(participant_id: str) -> dict:
-    """Generate EmotiBit stream/source names with participant prefix."""
-    prefix = f"{participant_id}_"
+def make_emotibit_stream_names(participant_id: str, device_name: str = "EmotiBit") -> dict:
+    """Generate EmotiBit stream/source names with participant + device prefix.
+    E.g. participant_id='P01', device_name='EmotiBit 1' → 'P01_EmotiBit1_IMU' etc."""
+    safe_dev = _safe(device_name)
+    prefix = f"{participant_id}_{safe_dev}"
     pid = participant_id.lower()
+    sid_suffix = f"{pid}_{safe_dev.lower()}"
     return {
-        "imu_name": f"{prefix}EmotiBit_IMU",
-        "ppg_name": f"{prefix}EmotiBit_PPG",
-        "eda_temp_name": f"{prefix}EmotiBit_EDA_TEMP",
-        "clock_name": f"Clock_{prefix}EmotiBit",
-        "imu_sid": f"emotibit_imu_{pid}",
-        "ppg_sid": f"emotibit_ppg_{pid}",
-        "eda_temp_sid": f"emotibit_eda_temp_{pid}",
-        "clock_sid": f"clock_emotibit_{pid}",
+        "imu_name": f"{prefix}_IMU",
+        "ppg_name": f"{prefix}_PPG",
+        "eda_temp_name": f"{prefix}_EDA_TEMP",
+        "clock_name": f"Clock_{prefix}",
+        "battery_name": f"{prefix}_Battery",
+        "imu_sid": f"emotibit_imu_{sid_suffix}",
+        "ppg_sid": f"emotibit_ppg_{sid_suffix}",
+        "eda_temp_sid": f"emotibit_eda_temp_{sid_suffix}",
+        "clock_sid": f"clock_emotibit_{sid_suffix}",
+        "battery_sid": f"emotibit_battery_{sid_suffix}",
+    }
+
+def make_polar_battery_stream(participant_id: str, device_name: str = "Polar") -> dict:
+    safe_dev = _safe(device_name)
+    return {
+        "name": f"{participant_id}_{safe_dev}_Battery",
+        "sid": f"polar_battery_{participant_id.lower()}_{safe_dev.lower()}",
     }
 
 # --- Sync cadence (seconds) ---
@@ -1416,6 +1436,7 @@ class BleakPolarThread(threading.Thread):
     PMD_CONTROL = "FB005C81-02E7-F387-1CAD-8ACD2D8DF0C8"
     PMD_DATA    = "FB005C82-02E7-F387-1CAD-8ACD2D8DF0C8"
     HR_MEAS     = "00002a37-0000-1000-8000-00805f9b34fb"
+    BATTERY     = "00002a19-0000-1000-8000-00805f9b34fb"  # Battery Level char
 
     ENABLE_ECG = bytes([0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00])
     ENABLE_ACC = bytes([0x02, 0x02, 0x00, 0x01, 0x32, 0x00, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00])
@@ -1425,22 +1446,39 @@ class BleakPolarThread(threading.Thread):
     ECG_PERIOD_S = 1.0 / ECG_RATE
     ACC_PERIOD_S = 1.0 / ACC_RATE
 
-    def __init__(self, address: str, label_map: Dict[str, Tuple[str, List[str], float]], health: DeviceHealth):
+    def __init__(self, address: str, label_map: Dict[str, Tuple[str, List[str], float]],
+                 health: DeviceHealth, participant_id: str = "", device_name: str = "Polar"):
         super().__init__(daemon=True)
         self.address = address
         self.label_map = label_map
         self.health = health
+        self.participant_id = participant_id
+        self.device_name = device_name
 
-        # LSL outlets — same as ArduinoUSBPolarThread
+        sid_suffix = f"{participant_id.lower()}_{_safe(device_name).lower()}" if participant_id else ""
+
+        # LSL outlets — ECG/ACC/beat
         self.outlets: Dict[str, StreamOutlet] = {}
         for lbl, (sname, ch_labels, srate) in self.label_map.items():
+            sid = f"polar_{lbl.lower()}_{sid_suffix}" if sid_suffix else f"polar_{lbl.lower()}"
             self.outlets[lbl] = make_lsl_outlet(
                 stream_name=sname,
                 stream_type="BIO",
                 channel_labels=ch_labels,
                 nominal_srate=float(srate),
-                source_id=f"polar_{lbl.lower()}",
+                source_id=sid,
             )
+
+        # Battery stream — irregular rate, single channel (percentage 0-100)
+        batt_info = make_polar_battery_stream(participant_id or "", device_name)
+        self.battery_outlet = make_lsl_outlet(
+            stream_name=batt_info["name"],
+            stream_type="Battery",
+            channel_labels=["battery_pct"],
+            nominal_srate=0.0,
+            source_id=batt_info["sid"],
+        )
+        self._last_battery_pct: Optional[int] = None
 
         # ECG filter + imputer — same as ArduinoUSBPolarThread
         self._polar_ecg_filters: Dict[str, SignalFilter] = (
@@ -1635,6 +1673,24 @@ class BleakPolarThread(threading.Thread):
             if not (frame_type & 0x80):
                 self._push_acc_batch(bytes(payload), polar_ts_ns)
 
+    def _handle_battery(self, sender, data: bytearray):
+        """BLE notification callback for Battery Level characteristic."""
+        if len(data) >= 1:
+            self._push_battery(int(data[0]))
+
+    def _push_battery(self, pct: int):
+        """Push battery percentage to LSL."""
+        if pct < 0 or pct > 100:
+            return
+        if self._last_battery_pct == pct:
+            return
+        self._last_battery_pct = pct
+        try:
+            self.battery_outlet.push_sample([float(pct)])
+            log("[BleakPolar]", f"Battery: {pct}%")
+        except Exception:
+            pass
+
     async def _run_async(self):
         """Main async loop: connect, subscribe, stream, auto-reconnect."""
         from bleak import BleakClient, BleakScanner
@@ -1659,6 +1715,15 @@ class BleakPolarThread(threading.Thread):
                     except Exception:
                         pass
                     await client.start_notify(self.PMD_DATA, self._handle_pmd)
+
+                    # Read + subscribe to battery level
+                    try:
+                        batt_data = await client.read_gatt_char(self.BATTERY)
+                        if batt_data:
+                            self._push_battery(int(batt_data[0]))
+                        await client.start_notify(self.BATTERY, self._handle_battery)
+                    except Exception as e:
+                        log("[BleakPolar]", f"Battery read failed: {e}")
 
                     await asyncio.sleep(1.0)
 
@@ -1741,21 +1806,24 @@ class BleakPolarThread(threading.Thread):
 
 class EmotiBitThread(threading.Thread):
     def __init__(self, health: DeviceHealth, participant_id: str = "",
-                 serial_number: str = ""):
+                 serial_number: str = "", device_name: str = "EmotiBit"):
         super().__init__(daemon=True)
         self.health = health
         self.participant_id = participant_id
+        self.device_name = device_name
         self._serial_number = serial_number
 
-        # Stream names: prefixed with participant ID if provided
+        # Stream names: prefixed with participant ID + device name if provided
         if participant_id:
-            sn = make_emotibit_stream_names(participant_id)
+            sn = make_emotibit_stream_names(participant_id, device_name)
         else:
             sn = {
                 "imu_name": "EmotiBit_IMU", "ppg_name": "EmotiBit_PPG",
                 "eda_temp_name": "EmotiBit_EDA_TEMP", "clock_name": "Clock_EmotiBit",
+                "battery_name": "EmotiBit_Battery",
                 "imu_sid": "emotibit_imu", "ppg_sid": "emotibit_ppg",
                 "eda_temp_sid": "emotibit_eda_temp", "clock_sid": "clock_emotibit",
+                "battery_sid": "emotibit_battery",
             }
 
         self.out_imu = make_lsl_outlet(
@@ -1779,6 +1847,16 @@ class EmotiBitThread(threading.Thread):
             nominal_srate=0.0,
             source_id=sn["eda_temp_sid"],
         )
+
+        # Battery stream — irregular, single channel (percentage 0-100)
+        self.battery_outlet = make_lsl_outlet(
+            stream_name=sn["battery_name"],
+            stream_type="Battery",
+            channel_labels=["battery_pct"],
+            nominal_srate=0.0,
+            source_id=sn["battery_sid"],
+        )
+        self._last_battery_pct: Optional[float] = None
 
         self.clock_outlet: Optional[StreamOutlet] = None
         if EMOTIBIT_CLOCK_STREAM:
@@ -1846,6 +1924,29 @@ class EmotiBitThread(threading.Thread):
         if self.offset_ema is None:
             return float(host_now)
         return float(t_dev - self.offset_ema)
+
+    def _poll_battery(self):
+        """Read latest battery value from BrainFlow and push to LSL if changed."""
+        if self._batt_idx is None or self._batt_preset is None:
+            return
+        try:
+            count = int(self._board.get_board_data_count(self._batt_preset))
+            if count <= 0:
+                return
+            data = self._board.get_current_board_data(1, self._batt_preset)
+            val = float(data[self._batt_idx][-1])
+        except Exception:
+            return
+        # EmotiBit battery is already in percentage (0-100)
+        pct = max(0.0, min(100.0, val))
+        if self._last_battery_pct is not None and abs(pct - self._last_battery_pct) < 1.0:
+            return
+        self._last_battery_pct = pct
+        try:
+            self.battery_outlet.push_sample([pct])
+            log("[EmotiBit]", f"Battery: {pct:.0f}%")
+        except Exception:
+            pass
 
     def _drain_and_push(self, preset: int, ts_row: int, indices: List[int], outlet: StreamOutlet, label: str, filters=None) -> int:
         try:
@@ -1960,6 +2061,20 @@ class EmotiBitThread(threading.Thread):
             self._ppg_idx = BoardShim.get_ppg_channels(bid, BrainFlowPresets.AUXILIARY_PRESET)
             self._eda_idx = BoardShim.get_eda_channels(bid, BrainFlowPresets.ANCILLARY_PRESET)
             self._temp_idx = BoardShim.get_temperature_channels(bid, BrainFlowPresets.ANCILLARY_PRESET)
+            # Battery channel (may be on any preset — try all)
+            self._batt_idx = None
+            self._batt_preset = None
+            for preset in (BrainFlowPresets.ANCILLARY_PRESET,
+                           BrainFlowPresets.AUXILIARY_PRESET,
+                           BrainFlowPresets.DEFAULT_PRESET):
+                try:
+                    ch = BoardShim.get_battery_channel(bid, preset)
+                    if ch is not None and ch >= 0:
+                        self._batt_idx = ch
+                        self._batt_preset = preset
+                        break
+                except Exception:
+                    continue
 
             self._ts_default = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.DEFAULT_PRESET)
             self._ts_aux = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.AUXILIARY_PRESET)
@@ -2001,6 +2116,8 @@ class EmotiBitThread(threading.Thread):
                         outlet=self.out_eda_temp,
                         label="EDA_TEMP",
                     )
+                # Battery: poll latest value
+                self._poll_battery()
             except Exception as e:
                 self.health.set(state="ERROR", fatal_error=f"runtime error: {e}")
                 log("[EmotiBit]", f"ERROR: runtime exception ({e})")
@@ -2221,12 +2338,14 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
             pname = polar_combos[pi].currentText()
             pc.polar_enabled = True
             pc.polar_name = pname
-            pc.polar_address = KNOWN_POLAR.get(pname, "")
+            entry = KNOWN_POLAR.get(pname, ("", ""))
+            pc.polar_address = entry[0] if isinstance(entry, tuple) else entry
         if emo_cbs[pi].isChecked() and emotibit_names:
             ename = emo_combos[pi].currentText()
             pc.emotibit_enabled = True
             pc.emotibit_name = ename
-            pc.emotibit_serial = KNOWN_EMOTIBIT.get(ename, "")
+            entry = KNOWN_EMOTIBIT.get(ename, ("", ""))
+            pc.emotibit_serial = entry[0] if isinstance(entry, tuple) else entry
         configs.append(pc)
 
     return configs
@@ -2318,20 +2437,23 @@ def main():
         pid = pc.participant_id
 
         if pc.polar_enabled and pc.polar_address:
-            label_map = make_polar_label_map(pid)
-            h = DeviceHealth(name=f"{pid} Polar ({pc.polar_name})", enabled=True)
+            label_map = make_polar_label_map(pid, pc.polar_name)
+            h = DeviceHealth(name=f"{pid} {pc.polar_name}", enabled=True)
             all_healths[h.name] = h
-            t = BleakPolarThread(address=pc.polar_address, label_map=label_map, health=h)
+            t = BleakPolarThread(address=pc.polar_address, label_map=label_map,
+                                 health=h, participant_id=pid,
+                                 device_name=pc.polar_name)
             t.start()
             threads.append(t)
             devices.append(h.name)
             log("[Main]", f"Started {h.name} → {pc.polar_address}")
 
         if pc.emotibit_enabled:
-            h = DeviceHealth(name=f"{pid} EmotiBit ({pc.emotibit_name})", enabled=True)
+            h = DeviceHealth(name=f"{pid} {pc.emotibit_name}", enabled=True)
             all_healths[h.name] = h
             t = EmotiBitThread(health=h, participant_id=pid,
-                               serial_number=pc.emotibit_serial)
+                               serial_number=pc.emotibit_serial,
+                               device_name=pc.emotibit_name)
             t.start()
             threads.append(t)
             devices.append(h.name)
