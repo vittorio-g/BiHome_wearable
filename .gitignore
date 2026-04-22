@@ -25,6 +25,9 @@ Viewer/recordings/*.xdf
 # Viewer diagnostics
 Viewer/diag/
 
+# Per-user persisted state
+wizard_defaults.json
+
 # LabRecorder binaries (too large for git, download separately)
 LabRecorder/*.exe
 LabRecorder/*.dll

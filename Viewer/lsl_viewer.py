@@ -381,7 +381,7 @@ class MarkerStream:
     Runs a background thread pushing samples at RATE Hz, so markers appear
     aligned with viewer time axis and can be recorded by LabRecorder.
     """
-    RATE = 20.0  # 20 Hz — same as viewer framerate
+    RATE = 100.0  # 100 Hz — high rate so brief pulses are still captured
 
     def __init__(self, name: str, stream_type: str, states: List[str] = None,
                  participant_id: str = ""):
@@ -427,11 +427,10 @@ class MarkerStream:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    # How long (in seconds) an 'event' marker stays at 1.0 on the plot after
-    # trigger(). The precise leading/trailing edges are still pushed with
-    # click-time timestamps for analysis; this only controls the visible
-    # spike width in the live viewer and the XDF recording.
-    EVENT_PULSE_S = 0.15
+    # Pulse duration for 'event' markers. Short enough that the spike looks
+    # crisp in the plot (~3 samples at 100 Hz publisher), while the leading
+    # edge carries a precise click-time timestamp for downstream analysis.
+    EVENT_PULSE_S = 0.03
 
     def _run(self):
         """Background publisher: keeps the state value continuously visible
@@ -626,8 +625,43 @@ class GroupPlotWindow(QtWidgets.QMainWindow):
         self.pw.setBackground(BG_DARK)
         lay.addWidget(self.pw)
 
+        # Participant code overlay in top-right corner
+        display_code = group_key if group_key not in ("_markers", "_other") \
+            else ("Markers" if group_key == "_markers" else "Other")
+        self.code_overlay = QtWidgets.QLabel(display_code, self.pw)
+        self.code_overlay.setStyleSheet(f"""
+            QLabel {{
+                color: {ACCENT};
+                font-family: 'Montserrat Black', 'Montserrat', sans-serif;
+                font-size: 20px; font-weight: 900; letter-spacing: 2px;
+                background: rgba(15, 19, 24, 160);
+                padding: 6px 12px; border-radius: 6px;
+            }}
+        """)
+        self.code_overlay.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.code_overlay.adjustSize()
+        self._reposition_overlay()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._reposition_overlay()
+
+    def _reposition_overlay(self):
+        if hasattr(self, 'code_overlay') and self.code_overlay is not None:
+            margin = 12
+            w = self.pw.width(); h = self.pw.height()
+            self.code_overlay.adjustSize()
+            self.code_overlay.move(
+                w - self.code_overlay.width() - margin, margin)
+            self.code_overlay.raise_()
+
     def closeEvent(self, ev):
-        # Don't actually destroy — just hide, so channels can still exist
+        # If the app is shutting down (controller closed), allow real close.
+        # Otherwise just hide the plot window — channels can still exist.
+        app = QtWidgets.QApplication.instance()
+        if app is not None and getattr(app, "_bihome_shutting_down", False):
+            super().closeEvent(ev)
+            return
         self.hide()
         ev.ignore()
 
@@ -718,6 +752,13 @@ class Viewer(QtWidgets.QMainWindow):
         # Deterministic color by channel label (same channel name across
         # participants → same color). Map: channel_label → color string.
         self._label_colors: Dict[str, str] = {}
+        # Saved plot window geometries (applied on first creation)
+        self._saved_plot_windows: Dict[str, dict] = {}
+        # Global registry of all channel toggle buttons + column header labels,
+        # used to equalize widths across every stream so AUTO/MIN/MAX columns
+        # line up regardless of the widest channel name.
+        self._all_ch_btns: List[QtWidgets.QPushButton] = []
+        self._all_toggle_headers: List[QtWidgets.QLabel] = []
 
         self._diag_done: set = set()
         self._diag_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diag")
@@ -788,15 +829,17 @@ class Viewer(QtWidgets.QMainWindow):
         """
 
         # Main vertical splitter: top row vs. streams
-        main_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        main_split.setStyleSheet(splitter_style)
-        main_split.setHandleWidth(4)
+        self._main_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._main_split.setStyleSheet(splitter_style)
+        self._main_split.setHandleWidth(4)
+        main_split = self._main_split
         outer.addWidget(main_split)
 
         # Top splitter: controls | markers
-        top_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        top_split.setStyleSheet(splitter_style)
-        top_split.setHandleWidth(4)
+        self._top_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._top_split.setStyleSheet(splitter_style)
+        self._top_split.setHandleWidth(4)
+        top_split = self._top_split
         main_split.addWidget(top_split)
 
         # ── Column 1: Controls ──
@@ -1044,10 +1087,16 @@ class Viewer(QtWidgets.QMainWindow):
         # Count how many plot windows we expect (approximate: current count)
         visible_count = max(1, len(self._plot_windows))
 
-        # Show first so Qt assigns a native frame; then tile
-        w.resize(700, 500)
-        w.show()
-        self._retile_plot_windows()
+        # Restore saved geometry if available; else tile
+        saved = self._saved_plot_windows.get(group_key)
+        if saved:
+            w.resize(int(saved.get("w", 700)), int(saved.get("h", 500)))
+            w.move(int(saved.get("x", 100)), int(saved.get("y", 100)))
+            w.show()
+        else:
+            w.resize(700, 500)
+            w.show()
+            self._retile_plot_windows()
         return w
 
     def _retile_plot_windows(self):
@@ -1486,11 +1535,13 @@ class Viewer(QtWidgets.QMainWindow):
         hdr_l.addWidget(grip_spacer)
 
         # Toggle plot header (matches the colored toggle button column)
-        self._hdr_ch_lbl = QtWidgets.QLabel("TOGGLE PLOT")
-        self._hdr_ch_lbl.setStyleSheet(hdr_style)
-        self._hdr_ch_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        self._hdr_ch_lbl.setMinimumWidth(90)
-        hdr_l.addWidget(self._hdr_ch_lbl)
+        hdr_toggle = QtWidgets.QLabel("TOGGLE PLOT")
+        hdr_toggle.setStyleSheet(hdr_style)
+        hdr_toggle.setAlignment(QtCore.Qt.AlignCenter)
+        hdr_toggle.setMinimumWidth(90)
+        hdr_l.addWidget(hdr_toggle)
+        self._all_toggle_headers.append(hdr_toggle)
+        self._hdr_ch_lbl = hdr_toggle  # keep reference for backward compat
 
         # Auto / min / max (match YScaleWidget fixed widths)
         for txt, w in (("AUTO", YScaleWidget.AUTO_W),
@@ -1584,16 +1635,24 @@ class Viewer(QtWidgets.QMainWindow):
             rw._ch_row = cr  # back-reference for drag & drop
             cbs.append(cb)
 
-        QtCore.QTimer.singleShot(0, lambda btns=ch_btns: self._equalize_btn_widths(btns))
+        # Register this stream's buttons globally and equalize ALL buttons
+        self._all_ch_btns.extend(ch_btns)
+        QtCore.QTimer.singleShot(0, self._equalize_all_btn_widths)
 
-    @staticmethod
-    def _equalize_btn_widths(btns):
+    def _equalize_all_btn_widths(self):
+        """Set ALL channel toggle buttons + TOGGLE PLOT headers to the same
+        width (widest label across every stream) so the AUTO/MIN/MAX columns
+        align in every stream."""
+        btns = self._all_ch_btns
         if not btns:
             return
         max_w = max(b.sizeHint().width() for b in btns)
-        max_w = max(max_w, 80)
+        max_w = max(max_w, 90)
         for b in btns:
             b.setFixedWidth(max_w)
+        # Headers too — same fixed width so TOGGLE PLOT / AUTO align everywhere
+        for lbl in self._all_toggle_headers:
+            lbl.setFixedWidth(max_w)
 
     def _rebuild_channel_layout(self):
         """Reorder channel row widgets in the layout to match self.rows order."""
@@ -1643,6 +1702,7 @@ class Viewer(QtWidgets.QMainWindow):
                 hdr_ch.setAlignment(QtCore.Qt.AlignCenter)
                 hdr_ch.setMinimumWidth(90)
                 hdr_l.addWidget(hdr_ch)
+                self._all_toggle_headers.append(hdr_ch)
                 for txt, w in (("AUTO", YScaleWidget.AUTO_W),
                                ("MIN",  YScaleWidget.SPIN_W),
                                ("MAX",  YScaleWidget.SPIN_W)):
@@ -2192,12 +2252,34 @@ class Viewer(QtWidgets.QMainWindow):
             if st:
                 stream_rec[st.name] = cb.isChecked()
 
+        # Splitter proportions
+        splitters = {}
+        try:
+            splitters["main"] = list(self._main_split.sizes())
+            splitters["top"]  = list(self._top_split.sizes())
+        except Exception:
+            pass
+
+        # Plot windows geometry per group_key
+        plot_windows = {}
+        try:
+            for gk, w in self._plot_windows.items():
+                plot_windows[gk] = {
+                    "x": w.x(), "y": w.y(),
+                    "w": w.width(), "h": w.height(),
+                    "visible": w.isVisible(),
+                }
+        except Exception:
+            pass
+
         settings = {
             "window_s": self.win_spin.value(),
             "window_geometry": {
                 "x": self.x(), "y": self.y(),
                 "w": self.width(), "h": self.height(),
             },
+            "splitters": splitters,
+            "plot_windows": plot_windows,
             "channel_visibility": ch_vis,
             "channel_yscale": ch_yscale,
             "stream_rec": stream_rec,
@@ -2228,7 +2310,20 @@ class Viewer(QtWidgets.QMainWindow):
         geo = s.get("window_geometry")
         if geo:
             self.setGeometry(geo.get("x", 100), geo.get("y", 100),
-                             geo.get("w", 1400), geo.get("h", 800))
+                             geo.get("w", 1200), geo.get("h", 800))
+
+        # Splitter sizes
+        sp = s.get("splitters", {})
+        try:
+            if "main" in sp:
+                self._main_split.setSizes([int(x) for x in sp["main"]])
+            if "top" in sp:
+                self._top_split.setSizes([int(x) for x in sp["top"]])
+        except Exception:
+            pass
+
+        # Cache plot-window geometry for later (applied in _get_or_create_plot_window)
+        self._saved_plot_windows = s.get("plot_windows", {})
 
         print(f"[Settings] Loaded from {SETTINGS_FILE}")
 
@@ -2277,15 +2372,22 @@ class Viewer(QtWidgets.QMainWindow):
             except Exception: pass
         for r in self.readers: r.stop()
         for r in self.readers: r.join(timeout=2)
-        # Force-close plot windows (they ignore closeEvent normally)
+
+        # Signal plot windows that they can close now
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app._bihome_shutting_down = True
+        # Close all plot windows
         for w in list(self._plot_windows.values()):
             try:
-                w.close_event_override = True
-                w.deleteLater()
+                w.close()
             except Exception:
                 pass
-        QtWidgets.QApplication.instance().quit()
+        self._plot_windows.clear()
+
         super().closeEvent(ev)
+        if app is not None:
+            app.quit()
 
 
 # ── main ─────────────────────────────────────────────────────────────────────

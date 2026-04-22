@@ -2267,7 +2267,9 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
             p.end()
 
     spin = _ArrowSpin()
-    spin.setRange(1, 6); spin.setValue(1)
+    _wizard_defaults = _load_wizard_defaults()
+    spin.setRange(1, 6)
+    spin.setValue(int(_wizard_defaults.get("n_participants", 1)))
     spin.setStyleSheet(f"""
         QSpinBox {{
             background: #252d38; color: {TEXT}; border: 1px solid {BORDER};
@@ -2328,7 +2330,7 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     grid = Qw.QGridLayout()
     grid.setSpacing(8)
     # Header
-    for ci, h in enumerate(["", "Polar H10", "", "EmotiBit", ""]):
+    for ci, h in enumerate(["Code", "Polar H10", "", "EmotiBit", ""]):
         lbl = Qw.QLabel(h)
         lbl.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold;")
         grid.addWidget(lbl, 0, ci)
@@ -2336,23 +2338,42 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     polar_names = list(KNOWN_POLAR.keys())
     emotibit_names = list(KNOWN_EMOTIBIT.keys())
 
+    # Load last used defaults
+    saved = _load_wizard_defaults()
+    saved_pids = saved.get("participant_codes", [])
+
+    code_edits = []
     polar_cbs = []; polar_combos = []
     emo_cbs = []; emo_combos = []
 
+    input_style = (f"QLineEdit {{ background: #252d38; color: {TEXT}; "
+                   f"border: 1px solid {BORDER}; border-radius: 4px; "
+                   f"padding: 4px; font-size: 13px; font-weight: bold; }}"
+                   f"QLineEdit:focus {{ border-color: {ACCENT}; }}")
+    combo_style = (f"QComboBox {{ background: #252d38; color: {TEXT}; "
+                   f"border: 1px solid {BORDER}; border-radius: 4px; padding: 4px; }}")
+
     for pi in range(n_participants):
-        pid = f"P{pi+1:02d}"
-        lbl = Qw.QLabel(pid)
-        lbl.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {ACCENT};")
-        grid.addWidget(lbl, pi + 1, 0)
+        default_pid = saved_pids[pi] if pi < len(saved_pids) else f"P{pi+1:02d}"
+
+        # Editable participant code
+        code_edit = Qw.QLineEdit(default_pid)
+        code_edit.setFixedWidth(80)
+        code_edit.setStyleSheet(input_style)
+        grid.addWidget(code_edit, pi + 1, 0)
+        code_edits.append(code_edit)
 
         # Polar checkbox + combo
         pcb = Qw.QCheckBox()
-        pcb.setChecked(len(polar_names) > 0)
+        pcb.setChecked(saved.get(f"polar_enabled_{pi}", len(polar_names) > 0))
         grid.addWidget(pcb, pi + 1, 1)
         pcombo = Qw.QComboBox()
         pcombo.addItems(polar_names if polar_names else ["(no Polar found)"])
-        pcombo.setStyleSheet(f"QComboBox {{ background: #252d38; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px; padding: 4px; }}")
-        if pi < len(polar_names):
+        pcombo.setStyleSheet(combo_style)
+        saved_pname = saved.get(f"polar_name_{pi}", "")
+        if saved_pname and saved_pname in polar_names:
+            pcombo.setCurrentText(saved_pname)
+        elif pi < len(polar_names):
             pcombo.setCurrentIndex(pi)
         pcb.toggled.connect(pcombo.setEnabled)
         pcombo.setEnabled(pcb.isChecked())
@@ -2361,11 +2382,16 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
 
         # EmotiBit checkbox + combo
         ecb = Qw.QCheckBox()
-        ecb.setChecked(len(emotibit_names) > 0)
+        ecb.setChecked(saved.get(f"emo_enabled_{pi}", len(emotibit_names) > 0))
         grid.addWidget(ecb, pi + 1, 3)
         ecombo = Qw.QComboBox()
         ecombo.addItems(emotibit_names if emotibit_names else ["(no EmotiBit found)"])
-        ecombo.setStyleSheet(f"QComboBox {{ background: #252d38; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px; padding: 4px; }}")
+        ecombo.setStyleSheet(combo_style)
+        saved_ename = saved.get(f"emo_name_{pi}", "")
+        if saved_ename and saved_ename in emotibit_names:
+            ecombo.setCurrentText(saved_ename)
+        elif pi < len(emotibit_names):
+            ecombo.setCurrentIndex(pi)
         ecb.toggled.connect(ecombo.setEnabled)
         ecombo.setEnabled(ecb.isChecked())
         grid.addWidget(ecombo, pi + 1, 4)
@@ -2381,11 +2407,20 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     if d2.exec_() != Qw.QDialog.Accepted:
         return None
 
-    # Build config list
+    # Build config list using user-entered participant codes
     configs = []
+    used_codes = set()
     for pi in range(n_participants):
-        pid = f"P{pi+1:02d}"
-        pc = ParticipantConfig(participant_id=pid)
+        code = code_edits[pi].text().strip() or f"P{pi+1:02d}"
+        # Sanitize: remove spaces, ensure uniqueness
+        code = code.replace(" ", "_")
+        base = code
+        i = 2
+        while code in used_codes:
+            code = f"{base}_{i}"; i += 1
+        used_codes.add(code)
+
+        pc = ParticipantConfig(participant_id=code)
         if polar_cbs[pi].isChecked() and polar_names:
             pname = polar_combos[pi].currentText()
             pc.polar_enabled = True
@@ -2400,7 +2435,39 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
             pc.emotibit_serial = entry[0] if isinstance(entry, tuple) else entry
         configs.append(pc)
 
+    # Persist wizard state for next session
+    _save_wizard_defaults(configs, n_participants)
     return configs
+
+
+# Wizard defaults persistence — stored next to the script
+_WIZARD_DEFAULTS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "wizard_defaults.json")
+
+def _load_wizard_defaults() -> dict:
+    try:
+        import json
+        with open(_WIZARD_DEFAULTS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_wizard_defaults(configs, n_participants):
+    try:
+        import json
+        data = {
+            "n_participants": n_participants,
+            "participant_codes": [c.participant_id for c in configs],
+        }
+        for i, c in enumerate(configs):
+            data[f"polar_enabled_{i}"] = c.polar_enabled
+            data[f"polar_name_{i}"] = c.polar_name
+            data[f"emo_enabled_{i}"] = c.emotibit_enabled
+            data[f"emo_name_{i}"] = c.emotibit_name
+        with open(_WIZARD_DEFAULTS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 
 def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
@@ -2627,11 +2694,16 @@ def main():
     print("Active:", ", ".join(devices))
     print("Type 'quit' to stop.\n", flush=True)
 
+    # Wait for either viewer subprocess to exit OR Ctrl-C OR 'quit' on stdin
     try:
-        for line in sys.stdin:
-            cmd = line.strip()
-            if cmd.lower() == "quit":
-                break
+        while True:
+            # If viewer was launched, exit when it closes
+            if viewer_proc is not None:
+                rc = viewer_proc.poll()
+                if rc is not None:
+                    log("[Main]", f"Viewer closed (exit code {rc}), shutting down.")
+                    break
+            time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
@@ -2643,6 +2715,8 @@ def main():
                 pass
         time.sleep(0.5)
         print("Shutdown complete.", flush=True)
+        # Force-exit so any lingering daemon threads don't keep the process alive
+        os._exit(0)
 
     wifi_thread: Optional[ArduinoWiFiECGThread] = None
     polar_thread: Optional[ArduinoUSBPolarThread] = None
