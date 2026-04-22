@@ -404,10 +404,10 @@ class MarkerConfigDialog(QtWidgets.QDialog):
             f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
         lay.addWidget(self.name_edit)
 
-        # Participant assignment
+        # Participant assignment — required so the marker appears in the
+        # participant's plot window (not a separate window)
         lay.addWidget(QtWidgets.QLabel("Attach to participant:"))
         self.pid_combo = QtWidgets.QComboBox()
-        self.pid_combo.addItem("Global (all participants)", "")
         for pid in (participant_ids or []):
             self.pid_combo.addItem(pid, pid)
         self.pid_combo.setStyleSheet(
@@ -921,17 +921,25 @@ class Viewer(QtWidgets.QMainWindow):
             w.resize(win_w, win_h)
 
     def _add_marker_stream(self):
-        """Open dialog to create a new marker stream."""
-        # Collect actual participants (not _markers/_other)
+        """Open dialog to create a new marker stream.
+        Markers must be attached to a participant so they appear in that
+        participant's plot window."""
         pids = [k for k in self._participant_streams.keys()
                 if k not in ("_markers", "_other")]
+        if not pids:
+            QtWidgets.QMessageBox.warning(self, "No participants",
+                "No participants are connected yet. Wait for streams to appear.")
+            return
         d = MarkerConfigDialog(self, participant_ids=pids)
         if d.exec_() != QtWidgets.QDialog.Accepted:
             return
         cfg = d.get_result()
+        pid = cfg.get("participant_id", "")
+        if not pid:
+            pid = pids[0]  # fallback to first participant
         try:
             m = MarkerStream(cfg["name"], cfg["type"], cfg.get("states"),
-                             participant_id=cfg.get("participant_id", ""))
+                             participant_id=pid)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Cannot create marker: {e}")
             return
@@ -1152,16 +1160,19 @@ class Viewer(QtWidgets.QMainWindow):
             self.streams[key] = st
 
             # Group assignment:
-            # - Markers attached to a participant (P01_Marker_*) → P01 group
-            # - Global markers (Marker_*) → "_markers" group
-            # - Regular streams with P01_ prefix → P01 group
+            # - Streams with P01_ prefix → P01 group (includes P01_Marker_*)
+            # - Un-prefixed markers (Marker_*) → first participant's group
+            #   (so they appear in a participant plot window, not a separate one)
             # - Everything else → "_other"
             pid, _ = extract_participant(st.name)
             is_marker = (st.stype == "Markers") or "Marker_" in st.name
             if pid:
                 group_key = pid
             elif is_marker:
-                group_key = "_markers"
+                # Attach to first existing participant group, or "_other" if none
+                participants = [k for k in self._participant_streams.keys()
+                                if k not in ("_markers", "_other")]
+                group_key = participants[0] if participants else "_other"
             else:
                 group_key = "_other"
 
