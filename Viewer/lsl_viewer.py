@@ -390,6 +390,7 @@ class MarkerStream:
         self.states = list(states) if states else []
         self.participant_id = participant_id  # "" = global, "P01" = attached to P01
         self._current = 0.0
+        self._pulse_until = 0.0  # for 'event' type: local_clock when pulse ends
         self._stop = threading.Event()
 
         # Stream name includes participant prefix when provided, so it groups
@@ -426,13 +427,25 @@ class MarkerStream:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    # How long (in seconds) an 'event' marker stays at 1.0 on the plot after
+    # trigger(). The precise leading/trailing edges are still pushed with
+    # click-time timestamps for analysis; this only controls the visible
+    # spike width in the live viewer and the XDF recording.
+    EVENT_PULSE_S = 0.15
+
     def _run(self):
         """Background publisher: keeps the state value continuously visible
-        at RATE Hz. Markers from trigger()/set_state() are pushed immediately
-        on the calling thread; this loop only fills in between."""
+        at RATE Hz. Transitions from trigger()/set_state() are ALSO pushed
+        immediately from the calling thread with click-time timestamps for
+        precision, but the background loop maintains visibility."""
         period = 1.0 / self.RATE
         while not self._stop.is_set():
             try:
+                # If a pulse is active and has elapsed, reset to 0
+                if self.type == "event" and self._pulse_until > 0:
+                    if pylsl.local_clock() >= self._pulse_until:
+                        self._current = 0.0
+                        self._pulse_until = 0.0
                 ts = pylsl.local_clock()
                 self.outlet.push_sample([float(self._current)], timestamp=ts)
             except Exception:
@@ -440,17 +453,18 @@ class MarkerStream:
             time.sleep(period)
 
     def trigger(self):
-        """For 'event' streams: fire a single 1.0 sample with precise timestamp,
-        then immediately reset to 0.0. Timestamp is captured at the moment of
-        the call (click time), not at the next publisher tick."""
+        """For 'event' streams: fire a pulse that stays at 1.0 for EVENT_PULSE_S
+        seconds. The leading edge is pushed at exact click time; the value is
+        also held by the background publisher so the spike is visible in the
+        live plot."""
         if self.type != "event":
             return
         ts = pylsl.local_clock()
+        self._current = 1.0
+        self._pulse_until = ts + self.EVENT_PULSE_S
         try:
-            # Push the 1.0 pulse at exact click time
+            # Push the 1.0 with precise click timestamp (leading edge)
             self.outlet.push_sample([1.0], timestamp=ts)
-            # Push a 0.0 one sample later (1/RATE s) so the pulse is narrow
-            self.outlet.push_sample([0.0], timestamp=ts + 1.0 / self.RATE)
         except Exception:
             pass
 
@@ -1117,7 +1131,7 @@ class Viewer(QtWidgets.QMainWindow):
 
         # Buttons row
         if m.type == "event":
-            fire_btn = QtWidgets.QPushButton("● TRIGGER")
+            fire_btn = QtWidgets.QPushButton(f"● TRIGGER  {m.name}")
             fire_btn.setStyleSheet(f"""
                 QPushButton {{ background: rgba(232,58,58,0.15); color: {RED_REC};
                                border: 1px solid {RED_REC}; border-radius: 4px;
