@@ -294,22 +294,30 @@ class MarkerStream:
     """
     RATE = 20.0  # 20 Hz — same as viewer framerate
 
-    def __init__(self, name: str, stream_type: str, states: List[str] = None):
+    def __init__(self, name: str, stream_type: str, states: List[str] = None,
+                 participant_id: str = ""):
         self.name = name
         self.type = stream_type  # 'event' or 'state'
         self.states = list(states) if states else []
+        self.participant_id = participant_id  # "" = global, "P01" = attached to P01
         self._current = 0.0
-        self._pulse_pending = False  # for 'event' — fire one sample of 1.0
         self._stop = threading.Event()
+
+        # Stream name includes participant prefix when provided, so it groups
+        # correctly in the viewer and records with the participant.
+        if participant_id:
+            stream_name = f"{participant_id}_Marker_{name}"
+        else:
+            stream_name = f"Marker_{name}"
 
         ch_label = "event" if stream_type == "event" else "state"
         info = pylsl.StreamInfo(
-            name=f"Marker_{name}",
+            name=stream_name,
             type="Markers",
             channel_count=1,
             nominal_srate=self.RATE,
             channel_format="float32",
-            source_id=f"marker_{name}_{int(time.time())}",
+            source_id=f"marker_{participant_id.lower()}_{name}_{int(time.time())}",
         )
         try:
             chns = info.desc().append_child("channels")
@@ -330,25 +338,45 @@ class MarkerStream:
         self._thread.start()
 
     def _run(self):
+        """Background publisher: keeps the state value continuously visible
+        at RATE Hz. Markers from trigger()/set_state() are pushed immediately
+        on the calling thread; this loop only fills in between."""
         period = 1.0 / self.RATE
         while not self._stop.is_set():
             try:
-                val = 1.0 if (self.type == "event" and self._pulse_pending) else self._current
-                self.outlet.push_sample([float(val)])
-                if self._pulse_pending:
-                    self._pulse_pending = False
+                ts = pylsl.local_clock()
+                self.outlet.push_sample([float(self._current)], timestamp=ts)
             except Exception:
                 pass
             time.sleep(period)
 
     def trigger(self):
-        """For 'event' streams: fire a single 1.0 sample."""
-        self._pulse_pending = True
+        """For 'event' streams: fire a single 1.0 sample with precise timestamp,
+        then immediately reset to 0.0. Timestamp is captured at the moment of
+        the call (click time), not at the next publisher tick."""
+        if self.type != "event":
+            return
+        ts = pylsl.local_clock()
+        try:
+            # Push the 1.0 pulse at exact click time
+            self.outlet.push_sample([1.0], timestamp=ts)
+            # Push a 0.0 one sample later (1/RATE s) so the pulse is narrow
+            self.outlet.push_sample([0.0], timestamp=ts + 1.0 / self.RATE)
+        except Exception:
+            pass
 
     def set_state(self, idx: int):
-        """For 'state' streams: set the current state index."""
-        if 0 <= idx < max(1, len(self.states)):
-            self._current = float(idx)
+        """For 'state' streams: switch to a new state with precise timestamp.
+        The new value is pushed IMMEDIATELY at click time, so the state
+        transition is recorded with ~1ms precision rather than up to 50ms."""
+        if not (0 <= idx < max(1, len(self.states))):
+            return
+        ts = pylsl.local_clock()
+        self._current = float(idx)
+        try:
+            self.outlet.push_sample([self._current], timestamp=ts)
+        except Exception:
+            pass
 
     def stop(self):
         self._stop.set()
@@ -356,7 +384,7 @@ class MarkerStream:
 
 class MarkerConfigDialog(QtWidgets.QDialog):
     """Dialog to configure a new marker stream."""
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, participant_ids: List[str] = None):
         super().__init__(parent)
         self.setWindowTitle("New Marker Stream")
         self.setMinimumWidth(400)
@@ -375,6 +403,17 @@ class MarkerConfigDialog(QtWidgets.QDialog):
             f"QLineEdit {{ background: {BG_INPUT}; color: {TEXT_PRIMARY}; "
             f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
         lay.addWidget(self.name_edit)
+
+        # Participant assignment
+        lay.addWidget(QtWidgets.QLabel("Attach to participant:"))
+        self.pid_combo = QtWidgets.QComboBox()
+        self.pid_combo.addItem("Global (all participants)", "")
+        for pid in (participant_ids or []):
+            self.pid_combo.addItem(pid, pid)
+        self.pid_combo.setStyleSheet(
+            f"QComboBox {{ background: {BG_INPUT}; color: {TEXT_PRIMARY}; "
+            f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
+        lay.addWidget(self.pid_combo)
 
         # Type
         lay.addWidget(QtWidgets.QLabel("Type:"))
@@ -426,6 +465,7 @@ class MarkerConfigDialog(QtWidgets.QDialog):
             "name": self.name_edit.text().strip().replace(" ", "_"),
             "type": "event" if self.type_event.isChecked() else "state",
             "states": [s.strip() for s in self.states_edit.toPlainText().splitlines() if s.strip()],
+            "participant_id": self.pid_combo.currentData() or "",
         }
 
 
@@ -564,6 +604,9 @@ class Viewer(QtWidgets.QMainWindow):
         self._prev_vis: List[bool] = []
         self._t_ref = pylsl.local_clock()
         self._color_idx = 0
+        # Deterministic color by channel label (same channel name across
+        # participants → same color). Map: channel_label → color string.
+        self._label_colors: Dict[str, str] = {}
 
         self._diag_done: set = set()
         self._diag_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diag")
@@ -617,11 +660,17 @@ class Viewer(QtWidgets.QMainWindow):
         side = QtWidgets.QWidget()
         side.setObjectName("sidebar")
         side.setStyleSheet(f"#sidebar {{ background: {BG_PANEL}; }}")
-        sl = QtWidgets.QVBoxLayout(side)
-        sl.setContentsMargins(16, 16, 16, 12)
-        sl.setSpacing(8)
 
-        # ── Logo / Title ──
+        # Outer horizontal layout: three columns
+        outer = QtWidgets.QHBoxLayout(side)
+        outer.setContentsMargins(16, 16, 16, 12)
+        outer.setSpacing(16)
+
+        # ── Column 1: Controls (fixed narrow width) ──
+        col1 = QtWidgets.QVBoxLayout(); col1.setSpacing(8)
+        col1_w = QtWidgets.QWidget(); col1_w.setLayout(col1)
+        col1_w.setFixedWidth(260)
+
         logo = QtWidgets.QLabel("BiHome")
         logo.setStyleSheet(f"""
             font-family: 'Montserrat Black', 'Montserrat', sans-serif;
@@ -629,13 +678,13 @@ class Viewer(QtWidgets.QMainWindow):
             color: {ACCENT}; letter-spacing: 1px;
             padding-bottom: 2px;
         """)
-        sl.addWidget(logo)
+        col1.addWidget(logo)
         sub = QtWidgets.QLabel("LSL Stream Viewer")
         sub.setStyleSheet(f"font-size: 11px; color: {GRAY}; padding-bottom: 6px;")
-        sl.addWidget(sub)
-        sl.addWidget(self._sep())
+        col1.addWidget(sub)
+        col1.addWidget(self._sep())
 
-        # ── Controls row ──
+        # Controls row
         ctrl = QtWidgets.QHBoxLayout(); ctrl.setSpacing(6)
         self.pause_btn = QtWidgets.QPushButton("Pause")
         self.pause_btn.setCheckable(True)
@@ -647,7 +696,7 @@ class Viewer(QtWidgets.QMainWindow):
         self._style_btn(ref_btn)
         ref_btn.clicked.connect(self._on_refresh)
         ctrl.addWidget(ref_btn)
-        sl.addLayout(ctrl)
+        col1.addLayout(ctrl)
 
         # Window spinner
         tw = QtWidgets.QHBoxLayout(); tw.setSpacing(6)
@@ -669,14 +718,14 @@ class Viewer(QtWidgets.QMainWindow):
             }}
         """)
         tw.addWidget(self.win_spin)
-        sl.addLayout(tw)
+        col1.addLayout(tw)
 
-        sl.addWidget(self._sep())
+        col1.addWidget(self._sep())
 
-        # ── Recording section ──
+        # Recording section
         sec_rec = QtWidgets.QLabel("RECORDING")
         sec_rec.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold; letter-spacing: 2px;")
-        sl.addWidget(sec_rec)
+        col1.addWidget(sec_rec)
 
         rec_row = QtWidgets.QHBoxLayout(); rec_row.setSpacing(6)
         self.rec_btn = QtWidgets.QPushButton("  REC")
@@ -705,36 +754,39 @@ class Viewer(QtWidgets.QMainWindow):
             QLineEdit:focus {{ border-color: {ACCENT}; }}
         """)
         rec_row.addWidget(self.rec_name)
-        sl.addLayout(rec_row)
+        col1.addLayout(rec_row)
         self.rec_status = QtWidgets.QLabel("")
         self.rec_status.setStyleSheet(f"font-size: 10px; color: {TEXT_DIM};")
         self.rec_status.setWordWrap(True)
-        sl.addWidget(self.rec_status)
+        col1.addWidget(self.rec_status)
 
         # Recording state
         self._rec_proc: Optional[subprocess.Popen] = None
         self._rec_file: str = ""
         self._rec_start_time: float = 0.0
 
-        sl.addWidget(self._sep())
+        col1.addWidget(self._sep())
 
         self.delay_lbl = QtWidgets.QLabel("Delays: --")
         self.delay_lbl.setStyleSheet(f"font-size: 10px; color: {GRAY};")
         self.delay_lbl.setWordWrap(True)
-        sl.addWidget(self.delay_lbl)
+        col1.addWidget(self.delay_lbl)
 
-        sl.addWidget(self._sep())
+        col1.addStretch()
+        outer.addWidget(col1_w)
 
-        # ── Streams / Channels section ──
+        # ── Column 2: Streams (wide, scrollable) ──
+        col2 = QtWidgets.QVBoxLayout(); col2.setSpacing(8)
+        col2_w = QtWidgets.QWidget(); col2_w.setLayout(col2)
+
         sec_ch = QtWidgets.QLabel("STREAMS")
         sec_ch.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold; letter-spacing: 2px;")
-        sl.addWidget(sec_ch)
+        col2.addWidget(sec_ch)
 
-        # Toggle All button at the top, always visible
         self.toggle_all_btn = QtWidgets.QPushButton("Toggle All Channels")
         self._style_btn(self.toggle_all_btn, small=True)
         self.toggle_all_btn.clicked.connect(self._toggle_all_channels)
-        sl.addWidget(self.toggle_all_btn)
+        col2.addWidget(self.toggle_all_btn)
 
         scr = QtWidgets.QScrollArea()
         scr.setWidgetResizable(True)
@@ -754,10 +806,14 @@ class Viewer(QtWidgets.QMainWindow):
         self.ch_lay.setSpacing(2)
         self.ch_lay.setContentsMargins(0, 0, 0, 0)
         scr.setWidget(self.ch_widget)
-        sl.addWidget(scr, stretch=1)
+        col2.addWidget(scr, stretch=1)
+        outer.addWidget(col2_w, stretch=2)
 
-        # ── MARKERS section ──
-        sl.addWidget(self._sep())
+        # ── Column 3: Markers (fixed width, scrollable) ──
+        col3 = QtWidgets.QVBoxLayout(); col3.setSpacing(8)
+        col3_w = QtWidgets.QWidget(); col3_w.setLayout(col3)
+        col3_w.setFixedWidth(260)
+
         mk_hdr_row = QtWidgets.QHBoxLayout()
         sec_mk = QtWidgets.QLabel("MARKERS")
         sec_mk.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold; letter-spacing: 2px;")
@@ -766,12 +822,10 @@ class Viewer(QtWidgets.QMainWindow):
         self._style_btn(add_mk_btn, small=True)
         add_mk_btn.clicked.connect(self._add_marker_stream)
         mk_hdr_row.addWidget(add_mk_btn)
-        sl.addLayout(mk_hdr_row)
+        col3.addLayout(mk_hdr_row)
 
-        # Scrollable markers area (smaller than streams)
         mk_scr = QtWidgets.QScrollArea()
         mk_scr.setWidgetResizable(True)
-        mk_scr.setMaximumHeight(220)
         mk_scr.setStyleSheet(f"""
             QScrollArea {{ border: none; background: transparent; }}
             QScrollBar:vertical {{ background: {BG_PANEL}; width: 6px; margin: 0; }}
@@ -786,23 +840,26 @@ class Viewer(QtWidgets.QMainWindow):
         self.mk_lay.setSpacing(4)
         self.mk_lay.setContentsMargins(0, 0, 0, 0)
         mk_scr.setWidget(self.mk_widget)
-        sl.addWidget(mk_scr)
+        col3.addWidget(mk_scr, stretch=1)
+        outer.addWidget(col3_w)
 
         # Marker state
         self.markers: List[MarkerStream] = []
         self.marker_widgets: List[QtWidgets.QWidget] = []
 
-        # Main window hosts only the sidebar (controls).  Plot windows are
+        # Main window hosts only the sidebar (controls). Plot windows are
         # created separately per participant / markers group.
         self.setCentralWidget(side)
-        self.resize(420, 900)
+        # Wider controller: 3-column horizontal layout
+        self.resize(1100, 600)
         self.setWindowTitle("BiHome Controller")
 
         # group_key → GroupPlotWindow
         self._plot_windows: Dict[str, GroupPlotWindow] = {}
 
     def _get_or_create_plot_window(self, group_key: str) -> GroupPlotWindow:
-        """Return the plot window for a group, creating+showing it if new."""
+        """Return the plot window for a group, creating+showing it if new.
+        Plot windows are tiled side-by-side below the controller window."""
         if group_key in self._plot_windows:
             w = self._plot_windows[group_key]
             if not w.isVisible():
@@ -817,21 +874,72 @@ class Viewer(QtWidgets.QMainWindow):
             title = f"BiHome — {group_key}"
         w = GroupPlotWindow(group_key, title)
         self._plot_windows[group_key] = w
-        # Position: offset windows so they don't overlap on initial show
-        n = len(self._plot_windows) - 1
-        main_geo = self.frameGeometry()
-        w.move(main_geo.right() + 10 + (n * 30), main_geo.top() + (n * 30))
+
+        # Tile windows: use available screen to split width equally among
+        # plot windows, placed below the controller
+        try:
+            screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        except Exception:
+            screen = None
+
+        # Count how many plot windows we expect (approximate: current count)
+        visible_count = max(1, len(self._plot_windows))
+
+        if screen is not None:
+            main_geo = self.frameGeometry()
+            top_y = main_geo.bottom() + 10
+            avail_w = screen.width()
+            avail_h = screen.height() - (top_y - screen.top()) - 20
+            # Each window gets avail_w / visible_count
+            win_w = max(450, avail_w // max(visible_count, 2))
+            win_h = max(400, avail_h)
+            n = len(self._plot_windows) - 1
+            x = screen.left() + n * win_w
+            if x + win_w > screen.right():
+                x = screen.left() + (n % max(visible_count, 1)) * win_w
+            w.setGeometry(x, top_y, win_w, win_h)
+            # Re-tile all existing windows so they remain equally sized
+            self._retile_plot_windows()
+        else:
+            main_geo = self.frameGeometry()
+            n = len(self._plot_windows) - 1
+            w.move(main_geo.right() + 10 + (n * 30), main_geo.top() + (n * 30))
+
         w.show()
         return w
 
+    def _retile_plot_windows(self):
+        """Re-tile all visible plot windows side-by-side along screen width."""
+        try:
+            screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        except Exception:
+            return
+        visible = [w for w in self._plot_windows.values() if w.isVisible() or True]
+        if not visible:
+            return
+        main_geo = self.frameGeometry()
+        top_y = main_geo.bottom() + 10
+        avail_w = screen.width()
+        avail_h = screen.height() - (top_y - screen.top()) - 20
+        n = len(visible)
+        win_w = max(450, avail_w // n) if n > 0 else 600
+        win_h = max(400, avail_h)
+        for i, w in enumerate(visible):
+            x = screen.left() + i * win_w
+            w.setGeometry(x, top_y, win_w, win_h)
+
     def _add_marker_stream(self):
         """Open dialog to create a new marker stream."""
-        d = MarkerConfigDialog(self)
+        # Collect actual participants (not _markers/_other)
+        pids = [k for k in self._participant_streams.keys()
+                if k not in ("_markers", "_other")]
+        d = MarkerConfigDialog(self, participant_ids=pids)
         if d.exec_() != QtWidgets.QDialog.Accepted:
             return
         cfg = d.get_result()
         try:
-            m = MarkerStream(cfg["name"], cfg["type"], cfg.get("states"))
+            m = MarkerStream(cfg["name"], cfg["type"], cfg.get("states"),
+                             participant_id=cfg.get("participant_id", ""))
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Cannot create marker: {e}")
             return
@@ -1051,13 +1159,19 @@ class Viewer(QtWidgets.QMainWindow):
 
             self.streams[key] = st
 
-            # Group assignment: markers → "_markers", participants → pid, else → "_other"
-            is_marker = (st.stype == "Markers") or st.name.startswith("Marker_")
-            if is_marker:
+            # Group assignment:
+            # - Markers attached to a participant (P01_Marker_*) → P01 group
+            # - Global markers (Marker_*) → "_markers" group
+            # - Regular streams with P01_ prefix → P01 group
+            # - Everything else → "_other"
+            pid, _ = extract_participant(st.name)
+            is_marker = (st.stype == "Markers") or "Marker_" in st.name
+            if pid:
+                group_key = pid
+            elif is_marker:
                 group_key = "_markers"
             else:
-                pid, _ = extract_participant(st.name)
-                group_key = pid if pid else "_other"
+                group_key = "_other"
 
             if group_key not in self._participant_streams:
                 self._participant_streams[group_key] = []
@@ -1219,14 +1333,25 @@ class Viewer(QtWidgets.QMainWindow):
 
         # For marker streams, use the marker name (without "Marker_" prefix)
         # as the channel button label instead of the generic "event"/"state".
-        is_marker = pid == "_markers"
-        display_name = st.name[len("Marker_"):] if (is_marker and st.name.startswith("Marker_")) else None
+        # Stream name formats:
+        #   "Marker_flash"      → display_name = "flash"
+        #   "P01_Marker_flash"  → display_name = "flash"
+        display_name = None
+        if "Marker_" in st.name:
+            idx = st.name.find("Marker_")
+            display_name = st.name[idx + len("Marker_"):]
 
         for ci, cl in enumerate(st.ch_labels):
             rw = DraggableChannelRow(viewer=self)
             rl = QtWidgets.QHBoxLayout(rw)
             rl.setContentsMargins(0, 1, 4, 1); rl.setSpacing(4)
-            color = COLORS[self._color_idx % len(COLORS)]; self._color_idx += 1
+            # Channel color: same across participants for same label
+            # e.g. 'ecg' is always teal, 'ax' is always orange, etc.
+            color_key = cl.lower() if cl else f"ch{ci}"
+            if color_key not in self._label_colors:
+                self._label_colors[color_key] = COLORS[self._color_idx % len(COLORS)]
+                self._color_idx += 1
+            color = self._label_colors[color_key]
 
             # Drag handle
             grip = QtWidgets.QLabel("\u2630")  # ☰ hamburger

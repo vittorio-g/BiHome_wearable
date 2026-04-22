@@ -2393,18 +2393,21 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
         details = []
         for name, h in healths.items():
             state, detail, _, _, first_data, _ = h.snapshot()
-            if first_data or state == "ACTIVE":
+            # Only count as connected when actual data has been received
+            if first_data:
                 connected += 1
-                details.append(f"{name}: connected")
+                details.append(f"{name}: streaming")
             elif state == "ERROR":
                 details.append(f"{name}: ERROR")
+            elif state == "ACTIVE":
+                details.append(f"{name}: connected, waiting for data...")
             else:
                 details.append(f"{name}: {detail or state}...")
         progress.setValue(connected)
         status_lbl.setText("\n".join(details))
         if connected >= len(healths):
-            status_lbl.setText("All devices connected!")
-            Qc.QTimer.singleShot(800, d.accept)
+            status_lbl.setText("All devices streaming data!")
+            Qc.QTimer.singleShot(600, d.accept)
 
     timer = Qc.QTimer()
     timer.timeout.connect(_poll)
