@@ -28,6 +28,13 @@ Viewer/diag/
 # Per-user persisted state
 wizard_defaults.json
 
+# PyInstaller build output (regenerate with: python build_exe.py)
+build/
+dist/
+
+# Claude Code worktrees (ephemeral, not for version control)
+.claude/worktrees/
+
 # LabRecorder binaries (too large for git, download separately)
 LabRecorder/*.exe
 LabRecorder/*.dll

@@ -1,0 +1,171 @@
+[2026-04-22 10:36:59.431] [board_logger] [info] incoming json: {
+    "file": "",
+    "file_anc": "",
+    "file_aux": "",
+    "ip_address": "",
+    "ip_address_anc": "",
+    "ip_address_aux": "",
+    "ip_port": 0,
+    "ip_port_anc": 0,
+    "ip_port_aux": 0,
+    "ip_protocol": 0,
+    "mac_address": "",
+    "master_board": -100,
+    "other_info": "",
+    "serial_number": "",
+    "serial_port": "",
+    "timeout": 15
+}
+[2026-04-22 10:36:59.431] [board_logger] [trace] Board object created 47
+[2026-04-22 10:36:59.431] [board_logger] [warning] no ip_address provided, trying to discover network, it may take longer
+[2026-04-22 10:36:59.436] [board_logger] [info] trying broadcast address: 127.255.255.255
+[2026-04-22 10:36:59.437] [board_logger] [info] sending package: 0,0,0,HE,1,100
+
+[2026-04-22 10:37:14.472] [board_logger] [error] no emotibit found
+[2026-04-22 10:37:14.472] [board_logger] [info] trying broadcast address: 10.227.219.255
+[2026-04-22 10:37:14.472] [board_logger] [info] sending package: 0,0,0,HE,1,100
+
+[2026-04-22 10:37:14.711] [board_logger] [trace] package is 527848,30,0,HH,1,100,DP,-1,DI,MD-V6-0000089
+[2026-04-22 10:37:14.711] [board_logger] [info] received HH package
+[2026-04-22 10:37:14.711] [board_logger] [info] Found emotibit: MD-V6-0000089
+[2026-04-22 10:37:15.711] [board_logger] [debug] adv_connection established, ip: 10.227.219.117, port: 3131
+[2026-04-22 10:37:15.711] [board_logger] [info] use port 3133 for data
+[2026-04-22 10:37:15.711] [board_logger] [info] local ip addr is 10.227.219.30
+[2026-04-22 10:37:15.711] [board_logger] [info] use port 3132 for control
+[2026-04-22 10:37:15.711] [board_logger] [info] sending connect package: 0,0,4,EC,1,100,CP,3132,DP,3133
+
+[2026-04-22 10:37:15.711] [board_logger] [trace] waiting for accept 0/20
+[2026-04-22 10:37:16.016] [board_logger] [trace] waiting for accept 1/20
+[2026-04-22 10:37:16.322] [board_logger] [trace] waiting for accept 2/20
+[2026-04-22 10:37:16.627] [board_logger] [trace] waiting for accept 3/20
+[2026-04-22 10:37:16.932] [board_logger] [trace] waiting for accept 4/20
+[2026-04-22 10:37:17.240] [board_logger] [trace] waiting for accept 5/20
+[2026-04-22 10:37:17.546] [board_logger] [trace] waiting for accept 6/20
+[2026-04-22 10:37:17.852] [board_logger] [trace] waiting for accept 7/20
+[2026-04-22 10:37:18.158] [board_logger] [trace] waiting for accept 8/20
+[2026-04-22 10:37:18.463] [board_logger] [trace] waiting for accept 9/20
+[2026-04-22 10:37:18.770] [board_logger] [trace] waiting for accept 10/20
+[2026-04-22 10:37:19.076] [board_logger] [trace] waiting for accept 11/20
+[2026-04-22 10:37:19.380] [board_logger] [trace] waiting for accept 12/20
+[2026-04-22 10:37:19.685] [board_logger] [trace] waiting for accept 13/20
+[2026-04-22 10:37:19.991] [board_logger] [trace] waiting for accept 14/20
+[2026-04-22 10:37:20.296] [board_logger] [trace] waiting for accept 15/20
+[2026-04-22 10:37:20.601] [board_logger] [trace] waiting for accept 16/20
+[2026-04-22 10:37:20.908] [board_logger] [trace] waiting for accept 17/20
+[2026-04-22 10:37:21.214] [board_logger] [trace] waiting for accept 18/20
+[2026-04-22 10:37:21.533] [board_logger] [trace] waiting for accept 19/20
+[2026-04-22 10:37:21.841] [board_logger] [trace] failed to establish connection
+[2026-04-22 10:37:24.343] [board_logger] [info] incoming json: {
+    "file": "",
+    "file_anc": "",
+    "file_aux": "",
+    "ip_address": "",
+    "ip_address_anc": "",
+    "ip_address_aux": "",
+    "ip_port": 0,
+    "ip_port_anc": 0,
+    "ip_port_aux": 0,
+    "ip_protocol": 0,
+    "mac_address": "",
+    "master_board": -100,
+    "other_info": "",
+    "serial_number": "",
+    "serial_port": "",
+    "timeout": 15
+}
+[2026-04-22 10:37:24.343] [board_logger] [trace] Board object created 47
+[2026-04-22 10:37:24.343] [board_logger] [warning] no ip_address provided, trying to discover network, it may take longer
+[2026-04-22 10:37:24.347] [board_logger] [info] trying broadcast address: 127.255.255.255
+[2026-04-22 10:37:24.347] [board_logger] [info] sending package: 0,0,0,HE,1,100
+
+[2026-04-22 10:37:39.363] [board_logger] [error] no emotibit found
+[2026-04-22 10:37:39.364] [board_logger] [info] trying broadcast address: 10.227.219.255
+[2026-04-22 10:37:39.364] [board_logger] [info] sending package: 0,0,0,HE,1,100
+
+[2026-04-22 10:37:39.504] [board_logger] [trace] package is 552658,31,0,HH,1,100,DP,-1,DI,MD-V6-0000089
+[2026-04-22 10:37:39.504] [board_logger] [info] received HH package
+[2026-04-22 10:37:39.504] [board_logger] [info] Found emotibit: MD-V6-0000089
+[2026-04-22 10:37:40.507] [board_logger] [debug] adv_connection established, ip: 10.227.219.117, port: 3131
+[2026-04-22 10:37:40.507] [board_logger] [info] use port 3133 for data
+[2026-04-22 10:37:40.507] [board_logger] [info] local ip addr is 10.227.219.30
+[2026-04-22 10:37:40.507] [board_logger] [info] use port 3132 for control
+[2026-04-22 10:37:40.507] [board_logger] [info] sending connect package: 0,0,4,EC,1,100,CP,3132,DP,3133
+
+[2026-04-22 10:37:40.508] [board_logger] [trace] waiting for accept 0/20
+[2026-04-22 10:37:40.812] [board_logger] [trace] waiting for accept 1/20
+[2026-04-22 10:37:41.117] [board_logger] [trace] waiting for accept 2/20
+[2026-04-22 10:37:41.424] [board_logger] [trace] waiting for accept 3/20
+[2026-04-22 10:37:41.730] [board_logger] [trace] waiting for accept 4/20
+[2026-04-22 10:37:42.035] [board_logger] [trace] waiting for accept 5/20
+[2026-04-22 10:37:42.342] [board_logger] [trace] waiting for accept 6/20
+[2026-04-22 10:37:42.647] [board_logger] [trace] waiting for accept 7/20
+[2026-04-22 10:37:42.953] [board_logger] [trace] waiting for accept 8/20
+[2026-04-22 10:37:43.258] [board_logger] [trace] waiting for accept 9/20
+[2026-04-22 10:37:43.564] [board_logger] [trace] waiting for accept 10/20
+[2026-04-22 10:37:43.869] [board_logger] [trace] waiting for accept 11/20
+[2026-04-22 10:37:44.175] [board_logger] [trace] waiting for accept 12/20
+[2026-04-22 10:37:44.480] [board_logger] [trace] waiting for accept 13/20
+[2026-04-22 10:37:44.785] [board_logger] [trace] waiting for accept 14/20
+[2026-04-22 10:37:45.091] [board_logger] [trace] waiting for accept 15/20
+[2026-04-22 10:37:45.396] [board_logger] [trace] waiting for accept 16/20
+[2026-04-22 10:37:45.702] [board_logger] [trace] waiting for accept 17/20
+[2026-04-22 10:37:46.009] [board_logger] [trace] waiting for accept 18/20
+[2026-04-22 10:37:46.314] [board_logger] [trace] waiting for accept 19/20
+[2026-04-22 10:37:46.618] [board_logger] [trace] failed to establish connection
+[2026-04-22 10:37:49.120] [board_logger] [info] incoming json: {
+    "file": "",
+    "file_anc": "",
+    "file_aux": "",
+    "ip_address": "",
+    "ip_address_anc": "",
+    "ip_address_aux": "",
+    "ip_port": 0,
+    "ip_port_anc": 0,
+    "ip_port_aux": 0,
+    "ip_protocol": 0,
+    "mac_address": "",
+    "master_board": -100,
+    "other_info": "",
+    "serial_number": "",
+    "serial_port": "",
+    "timeout": 15
+}
+[2026-04-22 10:37:49.120] [board_logger] [trace] Board object created 47
+[2026-04-22 10:37:49.120] [board_logger] [warning] no ip_address provided, trying to discover network, it may take longer
+[2026-04-22 10:37:49.123] [board_logger] [info] trying broadcast address: 127.255.255.255
+[2026-04-22 10:37:49.123] [board_logger] [info] sending package: 0,0,0,HE,1,100
+
+[2026-04-22 10:38:04.133] [board_logger] [error] no emotibit found
+[2026-04-22 10:38:04.133] [board_logger] [info] trying broadcast address: 10.227.219.255
+[2026-04-22 10:38:04.133] [board_logger] [info] sending package: 0,0,0,HE,1,100
+
+[2026-04-22 10:38:04.252] [board_logger] [trace] package is 1711652,32,0,HH,1,100,DP,-1,DI,MD-V6-0000482
+[2026-04-22 10:38:04.252] [board_logger] [info] received HH package
+[2026-04-22 10:38:04.252] [board_logger] [info] Found emotibit: MD-V6-0000482
+[2026-04-22 10:38:05.266] [board_logger] [debug] adv_connection established, ip: 10.227.219.98, port: 3131
+[2026-04-22 10:38:05.266] [board_logger] [info] use port 3133 for data
+[2026-04-22 10:38:05.267] [board_logger] [info] local ip addr is 10.227.219.30
+[2026-04-22 10:38:05.267] [board_logger] [info] use port 3132 for control
+[2026-04-22 10:38:05.267] [board_logger] [info] sending connect package: 0,0,4,EC,1,100,CP,3132,DP,3133
+
+[2026-04-22 10:38:05.267] [board_logger] [trace] waiting for accept 0/20
+[2026-04-22 10:38:05.568] [board_logger] [trace] waiting for accept 1/20
+[2026-04-22 10:38:05.884] [board_logger] [trace] waiting for accept 2/20
+[2026-04-22 10:38:06.184] [board_logger] [trace] waiting for accept 3/20
+[2026-04-22 10:38:06.500] [board_logger] [trace] waiting for accept 4/20
+[2026-04-22 10:38:06.801] [board_logger] [trace] waiting for accept 5/20
+[2026-04-22 10:38:07.116] [board_logger] [trace] waiting for accept 6/20
+[2026-04-22 10:38:07.417] [board_logger] [trace] waiting for accept 7/20
+[2026-04-22 10:38:07.718] [board_logger] [trace] waiting for accept 8/20
+[2026-04-22 10:38:08.033] [board_logger] [trace] waiting for accept 9/20
+[2026-04-22 10:38:08.334] [board_logger] [trace] waiting for accept 10/20
+[2026-04-22 10:38:08.634] [board_logger] [trace] waiting for accept 11/20
+[2026-04-22 10:38:08.950] [board_logger] [trace] waiting for accept 12/20
+[2026-04-22 10:38:09.251] [board_logger] [trace] waiting for accept 13/20
+[2026-04-22 10:38:09.566] [board_logger] [trace] waiting for accept 14/20
+[2026-04-22 10:38:09.866] [board_logger] [trace] waiting for accept 15/20
+[2026-04-22 10:38:10.167] [board_logger] [trace] waiting for accept 16/20
+[2026-04-22 10:38:10.483] [board_logger] [trace] waiting for accept 17/20
+[2026-04-22 10:38:10.784] [board_logger] [trace] waiting for accept 18/20
+[2026-04-22 10:38:11.084] [board_logger] [trace] waiting for accept 19/20
+[2026-04-22 10:38:11.399] [board_logger] [trace] failed to establish connection

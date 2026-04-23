@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r \"nominal_srate\\\\|channel_count\\\\|source_id\" /c/Users/vitto/Desktop/BiHome_wearable/*.py)",
+      "Bash(python -c \"import pylsl; import pyqtgraph; import PyQt5; import numpy; print\\(''OK''\\)\")",
+      "Bash(conda info:*)",
+      "Bash(conda run:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''Viewer/lsl_viewer.py''\\).read\\(\\)\\); print\\(''Viewer: OK''\\)\")",
+      "Bash(git stash:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

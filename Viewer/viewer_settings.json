@@ -1,0 +1,46 @@
+{
+  "window_s": 10.0,
+  "window_geometry": {
+    "x": -1921,
+    "y": -8,
+    "w": 1920,
+    "h": 1009
+  },
+  "channel_visibility": {
+    "P01_Polar1/ecg": true,
+    "P01_Polar1/ax": true,
+    "P01_Polar1/ay": true,
+    "P01_Polar1/az": true,
+    "P01_Polar1/beat": false,
+    "P01_Marker_bulibuli/bulibuli": true,
+    "P01_Marker_poti/poti": true
+  },
+  "channel_yscale": {
+    "P01_Polar1/ecg": {
+      "auto": true
+    },
+    "P01_Polar1/ax": {
+      "auto": true
+    },
+    "P01_Polar1/ay": {
+      "auto": true
+    },
+    "P01_Polar1/az": {
+      "auto": true
+    },
+    "P01_Polar1/beat": {
+      "auto": true
+    },
+    "P01_Marker_bulibuli/bulibuli": {
+      "auto": true
+    },
+    "P01_Marker_poti/poti": {
+      "auto": true
+    }
+  },
+  "stream_rec": {
+    "P01_Polar1": true,
+    "P01_Marker_bulibuli": true,
+    "P01_Marker_poti": true
+  }
+}
