@@ -2062,14 +2062,17 @@ class EmotiBitThread(threading.Thread):
             self._board_id = BoardIds.EMOTIBIT_BOARD
             self._board = BoardShim(self._board_id, params)
 
-            self.health.set(state="CONNECTING", detail=f"prepare_session (ip={EMOTIBIT_IP})")
-            log("[EmotiBit]", f"Preparing session via BrainFlow (ip/broadcast={EMOTIBIT_IP})...")
+            tag = f"[EmotiBit:{self.participant_id or '?'}]"
+            self.health.set(state="CONNECTING", detail=f"prepare_session (sn={sn or 'auto'})")
+            log(tag, f"Preparing session: ip={EMOTIBIT_IP or 'broadcast'}, "
+                     f"serial={sn or 'auto-discover first'}")
             self._board.prepare_session()
+            log(tag, "prepare_session OK")
 
             self.health.set(state="CONNECTING", detail="start_stream")
             self._board.start_stream(45000, "")
+            log(tag, "start_stream OK")
             self.health.set(state="ACTIVE", detail="connected (waiting data)")
-            log("[EmotiBit]", "Session started. Waiting for data...")
 
             bid = int(self._board_id.value) if hasattr(self._board_id, "value") else int(self._board_id)
 
@@ -2101,8 +2104,16 @@ class EmotiBitThread(threading.Thread):
             self._ts_anc = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.ANCILLARY_PRESET)
 
         except Exception as e:
-            self.health.set(state="ERROR", fatal_error=f"brainflow session error: {e}")
-            log("[EmotiBit]", f"ERROR: cannot start session/stream ({e})")
+            import traceback
+            tb = traceback.format_exc()
+            err_type = type(e).__name__
+            tag = f"[EmotiBit:{self.participant_id or '?'}]"
+            self.health.set(state="ERROR",
+                            fatal_error=f"brainflow {err_type}: {e}")
+            log(tag, f"ERROR ({err_type}): {e}")
+            log(tag, f"Traceback (last 3 frames):")
+            for line in tb.splitlines()[-6:]:
+                log(tag, f"  {line}")
             try:
                 if self._board is not None:
                     self._board.release_session()
