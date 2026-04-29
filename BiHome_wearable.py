@@ -2155,24 +2155,15 @@ class EmotiBitThread(threading.Thread):
         if data.ndim != 2 or data.shape[1] == 0:
             return 0
 
-        # ── 1. Sort by package number (UDP can arrive out of order) ──
-        # NOTE: previous version did np.unique() dedup here, but that
-        # collapsed many samples into one, dropping ~60% of EmotiBit data.
-        # We now only sort and remove ADJACENT duplicates (which is what
-        # BrainFlow occasionally produces during partial-frame flushes).
+        # ── 1. Use package_num for gap detection only ──
+        # Empirically the EmotiBit board's package_num column appears to
+        # share a counter across presets — dedup'ing on it collapses
+        # legitimate samples (we observed pushed=268 identical for all
+        # three presets despite drained being 680/679/411).  BrainFlow
+        # already drains its ring in arrival order, so we just trust the
+        # data as returned, and use pkg only for gap counting.
         if pkg_row is not None and pkg_row < data.shape[0]:
             pkg = data[pkg_row].astype(np.int64)
-            if len(pkg) > 1:
-                order = np.argsort(pkg, kind='stable')
-                data = data[:, order]
-                pkg = pkg[order]
-                # Remove only adjacent duplicates (all in one contiguous block
-                # after sort). Keeps the first occurrence in each duplicate run.
-                keep = np.ones(len(pkg), dtype=bool)
-                keep[1:] = pkg[1:] != pkg[:-1]
-                if not np.all(keep):
-                    data = data[:, keep]
-                    pkg = pkg[keep]
         else:
             pkg = None
 
@@ -2331,6 +2322,11 @@ class EmotiBitThread(threading.Thread):
             self._ts_default = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.DEFAULT_PRESET)
             self._ts_aux = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.AUXILIARY_PRESET)
             self._ts_anc = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.ANCILLARY_PRESET)
+
+            log(tag,
+                f"BrainFlow channels — IMU(acc/gyro/mag)={self._imu_idx} "
+                f"PPG={self._ppg_idx} EDA={self._eda_idx} TEMP={self._temp_idx} "
+                f"battery={self._batt_idx}@preset{self._batt_preset}")
 
             # Package-number column per preset — used to sort UDP packets that
             # arrive out of order, dedupe, and detect dropped frames.

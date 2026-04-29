@@ -1383,9 +1383,13 @@ class Viewer(QtWidgets.QMainWindow):
             if key in self.streams:
                 continue
 
-            # Battery streams: not shown as channels, just read the value
+            # Battery streams: not shown as channels, just read the value.
+            # Mark as already-handled so the next discovery cycle doesn't
+            # open a second inlet on top (we'd see "[LSL] opened ..._Battery"
+            # repeating in the log every 5 seconds otherwise).
             if st.stype == "Battery" or st.name.endswith("_Battery"):
                 self._start_battery_reader(key, st)
+                self._ignored_streams.add(key)
                 continue
 
             # Clock/sync streams: useful in recordings but cluttering the
@@ -1830,15 +1834,29 @@ class Viewer(QtWidgets.QMainWindow):
     # ── BPM / HRV ───────────────────────────────────────────────────────
 
     def _find_beat_channels(self) -> Dict[str, Tuple[str, int]]:
-        """Find beat channels per participant. Returns {pid: (skey, ch_index)}."""
-        result = {}
+        """Find beat channels per participant. Returns {pid: (skey, ch_index)}.
+
+        When multiple streams for the same participant expose a 'beat' channel
+        (e.g. zombie LSL outlet from a previous run + the current one), pick
+        the one with the most recent data — otherwise we'd lock onto a stale
+        stream that never updates and never compute HR."""
+        # First collect all candidates: pid → list of (latest_ts, key, ci)
+        candidates: Dict[str, List[Tuple[float, str, int]]] = {}
         for key, st in self.streams.items():
             pid, _ = extract_participant(st.name)
             if not pid:
                 pid = "_other"
             for ci, cl in enumerate(st.ch_labels):
-                if cl.lower() == "beat" and pid not in result:
-                    result[pid] = (key, ci)
+                if cl.lower() == "beat":
+                    candidates.setdefault(pid, []).append(
+                        (float(st.latest_ts or 0.0), key, ci))
+                    break
+        # For each participant, pick the candidate with the highest latest_ts
+        result: Dict[str, Tuple[str, int]] = {}
+        for pid, lst in candidates.items():
+            lst.sort(key=lambda x: x[0], reverse=True)
+            _, key, ci = lst[0]
+            result[pid] = (key, ci)
         return result
 
     def _update_hr(self, t_min: float):
