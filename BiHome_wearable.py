@@ -1795,17 +1795,15 @@ class BleakPolarThread(threading.Thread):
     def run(self):
         if not ENABLE_BLEAK_POLAR:
             return
-        # Run async event loop in this thread. On Windows bleak needs the
-        # Proactor event loop + COM init to call into WinRT BLE APIs.
+        # bleak handles its own WinRT/COM initialization — we only need to
+        # ensure asyncio uses the Proactor event loop on Windows. Do NOT
+        # call CoInitializeEx ourselves: STA conflicts with WinRT MTA and
+        # gives "Thread is configured for Windows GUI but callbacks are
+        # not working".
         if sys.platform == "win32":
             try:
                 asyncio.set_event_loop_policy(
                     asyncio.WindowsProactorEventLoopPolicy())
-            except Exception:
-                pass
-            try:
-                import ctypes
-                ctypes.windll.ole32.CoInitializeEx(None, 0x2)  # COINIT_APARTMENTTHREADED
             except Exception:
                 pass
 
@@ -1820,12 +1818,6 @@ class BleakPolarThread(threading.Thread):
                 loop.close()
             except Exception:
                 pass
-            if sys.platform == "win32":
-                try:
-                    import ctypes
-                    ctypes.windll.ole32.CoUninitialize()
-                except Exception:
-                    pass
 
 
 # =====================================================
