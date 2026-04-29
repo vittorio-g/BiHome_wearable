@@ -752,6 +752,11 @@ class Viewer(QtWidgets.QMainWindow):
         self._label_colors: Dict[str, str] = {}
         # Saved plot window geometries (applied on first creation)
         self._saved_plot_windows: Dict[str, dict] = {}
+        # Streams that we've decided to skip permanently (CLOCK, etc.).
+        # Without this, _resolve_bg re-discovers them every 5 s, our inlet
+        # close+forget triggers a "Stream transmission broke off" / reconnect
+        # loop on the source side.
+        self._ignored_streams: set = set()
         # Global registry of all channel toggle buttons + column header labels,
         # used to equalize widths across every stream so AUTO/MIN/MAX columns
         # line up regardless of the widest channel name.
@@ -1322,6 +1327,8 @@ class Viewer(QtWidgets.QMainWindow):
             with self._resolver_lock:
                 if key in self.streams:
                     continue
+                if key in self._ignored_streams:
+                    continue  # already classified as ignore-only (e.g. CLOCK)
             nch = info.channel_count()
             try:
                 inlet = pylsl.StreamInlet(info, max_buflen=360,
@@ -1384,11 +1391,14 @@ class Viewer(QtWidgets.QMainWindow):
             # Clock/sync streams: useful in recordings but cluttering the
             # live view (mostly flat diagnostic values). Skip the UI
             # entirely — the LSL stream stays available for LabRecorder.
+            # Mark as ignored so future discovery cycles don't re-open it
+            # (which produced a connect-close-reconnect loop on the source).
             if st.stype == "CLOCK" or st.name.startswith("Clock_"):
                 try:
                     st.inlet.close_stream()
                 except Exception:
                     pass
+                self._ignored_streams.add(key)
                 continue
 
             self.streams[key] = st

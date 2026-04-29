@@ -680,6 +680,7 @@ class PolarECGImputer:
         self._warmup_warn_logged: bool = False
         # Cumulative count of internal peak detections (for diagnostics)
         self._n_peaks_detected: int = 0
+        self._last_diag_log_ts: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -747,6 +748,15 @@ class PolarECGImputer:
                 f"Warmup complete after {elapsed_since_start:.1f}s "
                 f"(peaks: {self._n_peaks_detected}, RR: {len(self._rr_hist)}). "
                 f"Beat output enabled.")
+        # Periodic diagnostic every 5s while in warmup
+        if in_warmup and (ts - self._last_diag_log_ts) > 5.0:
+            self._last_diag_log_ts = ts
+            ema = self._peak_amp_ema
+            ema_str = f"{ema:.0f}µV" if ema is not None else "None"
+            log("[Beat]",
+                f"diag t={elapsed_since_start:.1f}s "
+                f"peaks={self._n_peaks_detected} "
+                f"RR_hist={len(self._rr_hist)} amp_ema={ema_str}")
 
         # Gap prediction: if no beat detected for > 1.8 × mean RR, advance the
         # expected beat position and mark this sample as a predicted beat.
@@ -2146,17 +2156,23 @@ class EmotiBitThread(threading.Thread):
             return 0
 
         # ── 1. Sort by package number (UDP can arrive out of order) ──
+        # NOTE: previous version did np.unique() dedup here, but that
+        # collapsed many samples into one, dropping ~60% of EmotiBit data.
+        # We now only sort and remove ADJACENT duplicates (which is what
+        # BrainFlow occasionally produces during partial-frame flushes).
         if pkg_row is not None and pkg_row < data.shape[0]:
             pkg = data[pkg_row].astype(np.int64)
             if len(pkg) > 1:
                 order = np.argsort(pkg, kind='stable')
                 data = data[:, order]
                 pkg = pkg[order]
-            # Dedupe: keep first occurrence of each package number
-            _, uniq_idx = np.unique(pkg, return_index=True)
-            uniq_idx = np.sort(uniq_idx)
-            data = data[:, uniq_idx]
-            pkg = pkg[uniq_idx]
+                # Remove only adjacent duplicates (all in one contiguous block
+                # after sort). Keeps the first occurrence in each duplicate run.
+                keep = np.ones(len(pkg), dtype=bool)
+                keep[1:] = pkg[1:] != pkg[:-1]
+                if not np.all(keep):
+                    data = data[:, keep]
+                    pkg = pkg[keep]
         else:
             pkg = None
 
