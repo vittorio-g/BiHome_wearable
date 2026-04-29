@@ -2294,9 +2294,13 @@ def _scan_polar_macs(timeout: float = 6.0) -> set:
 
 def _scan_emotibit_ids(timeout: float = 5.0) -> set:
     """Scan local network for EmotiBits via the advertising protocol.
-    Returns the set of device_id strings (e.g. 'MD-V6-0000089')."""
+    Returns the set of device_id strings (e.g. 'MD-V6-0000089').
+
+    Note: this binds UDP port 3131. If EmotiBit Oscilloscope or any other
+    EmotiBit-host app is running, the bind will fail and we cannot scan."""
     import socket
     found = set()
+    log("[Scan]", "EmotiBit: opening UDP 3131...")
     try:
         rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2304,7 +2308,7 @@ def _scan_emotibit_ids(timeout: float = 5.0) -> set:
         rx.bind(('', 3131))
         rx.settimeout(0.5)
     except OSError as e:
-        log("[Scan]", f"Cannot bind UDP 3131 for EmotiBit scan: {e}")
+        log("[Scan]", f"Cannot bind UDP 3131 — close EmotiBit Oscilloscope and retry. ({e})")
         return set()
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -2319,27 +2323,34 @@ def _scan_emotibit_ids(timeout: float = 5.0) -> set:
     except Exception:
         bcast = '255.255.255.255'
 
+    log("[Scan]", f"EmotiBit: broadcasting HELLO on {bcast}:3131 for {timeout}s...")
     t0 = time.time()
     last_send = 0.0
+    n_packets = 0
     while time.time() - t0 < timeout:
         now = time.time()
         if now - last_send > 1.0:
             for tgt in (bcast, '255.255.255.255'):
                 try:
                     tx.sendto(HELLO, (tgt, 3131))
-                except Exception:
-                    pass
+                except Exception as e:
+                    log("[Scan]", f"send error to {tgt}: {e}")
             last_send = now
         try:
-            data, _ = rx.recvfrom(4096)
+            data, addr = rx.recvfrom(4096)
+            n_packets += 1
             txt = data.decode('utf-8', errors='replace')
             parts = [p.strip() for p in txt.split(',')]
             for i, p in enumerate(parts):
                 if p == "DI" and i + 1 < len(parts):
-                    found.add(parts[i + 1])
+                    dev_id = parts[i + 1]
+                    if dev_id not in found:
+                        log("[Scan]", f"EmotiBit found: {dev_id} at {addr[0]}")
+                    found.add(dev_id)
                     break
         except socket.timeout:
             continue
+    log("[Scan]", f"EmotiBit scan complete: {n_packets} packets, {len(found)} unique IDs: {found}")
     try: rx.close()
     except Exception: pass
     try: tx.close()
@@ -2543,12 +2554,32 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
         return None
     n_participants = spin.value()
 
-    # ── Discover devices on BLE + WiFi ──
-    discovered = run_device_scan_dialog()
-    polar_online = discovered.get("polar", set())
-    emo_online = discovered.get("emotibit", set())
+    # ── Loop: scan + assignment dialog. User can request rescan from inside ──
+    while True:
+        discovered = run_device_scan_dialog()
+        polar_online = discovered.get("polar", set())
+        emo_online = discovered.get("emotibit", set())
+        # Build dialog 2 (block of code below). On rescan: continue loop.
+        # On accept: break with results. On cancel: return None.
+        result = _build_assignment_dialog(
+            n_participants=n_participants,
+            polar_online=polar_online,
+            emo_online=emo_online,
+            btn_style=btn_style,
+            ACCENT=ACCENT, BG_CARD=BG_CARD, BORDER=BORDER, GRAY=GRAY, TEXT=TEXT,
+        )
+        if result == "rescan":
+            continue
+        if result is None:
+            return None
+        return result
 
-    # ── Dialog 2: Device assignment ──
+# (continuation of run_setup_wizard; the inline build code is moved below)
+def _build_assignment_dialog(n_participants, polar_online, emo_online,
+                              btn_style, ACCENT, BG_CARD, BORDER, GRAY, TEXT):
+    """Return list of ParticipantConfig, or 'rescan', or None (cancel)."""
+    from PyQt5 import QtWidgets as Qw, QtCore as Qc, QtGui as Qg
+
     d2 = Qw.QDialog()
     d2.setWindowTitle("BiHome — Device Assignment")
     d2.setMinimumWidth(620)
@@ -2597,12 +2628,16 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
                             "<br>".join(emo_summary_lines))
             lbl.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
             detected_lay.addWidget(lbl)
+    _action = {"value": "cancel"}  # 'cancel' | 'rescan' | 'connect'
     rescan_btn = Qw.QPushButton("Rescan")
     rescan_btn.setStyleSheet(
         f"QPushButton {{ background: transparent; color: {GRAY}; border: none; "
         f"text-align: right; font-size: 10px; }} "
         f"QPushButton:hover {{ color: {ACCENT}; }}")
-    rescan_btn.clicked.connect(lambda: (d2.reject(), d2.setProperty("rescan", True)))
+    def _on_rescan():
+        _action["value"] = "rescan"
+        d2.accept()
+    rescan_btn.clicked.connect(_on_rescan)
     detected_lay.addWidget(rescan_btn, alignment=Qc.Qt.AlignRight)
     l2.addWidget(detected_box)
 
@@ -2707,10 +2742,16 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
 
     ok2 = Qw.QPushButton("Connect")
     ok2.setStyleSheet(btn_style)
-    ok2.clicked.connect(d2.accept)
+    def _on_connect():
+        _action["value"] = "connect"
+        d2.accept()
+    ok2.clicked.connect(_on_connect)
     l2.addWidget(ok2)
 
-    if d2.exec_() != Qw.QDialog.Accepted:
+    d2.exec_()
+    if _action["value"] == "rescan":
+        return "rescan"
+    if _action["value"] != "connect":
         return None
 
     # Build config list using user-entered participant codes
