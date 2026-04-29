@@ -2340,7 +2340,11 @@ def _scan_emotibit_ids(timeout: float = 5.0) -> set:
             data, addr = rx.recvfrom(4096)
             n_packets += 1
             txt = data.decode('utf-8', errors='replace')
+            # DEBUG: print first 5 packets so we can see the actual format
+            if n_packets <= 5:
+                log("[Scan]", f"  pkt #{n_packets} from {addr[0]}: {txt[:200]!r}")
             parts = [p.strip() for p in txt.split(',')]
+            # Try classic format: ...,DI,<id>,...
             for i, p in enumerate(parts):
                 if p == "DI" and i + 1 < len(parts):
                     dev_id = parts[i + 1]
@@ -2348,6 +2352,15 @@ def _scan_emotibit_ids(timeout: float = 5.0) -> set:
                         log("[Scan]", f"EmotiBit found: {dev_id} at {addr[0]}")
                     found.add(dev_id)
                     break
+            else:
+                # Fallback: search anywhere in text for "MD-V" pattern (EmotiBit ID)
+                import re as _re
+                m = _re.search(r'(MD-?V\d+-?\d+)', txt)
+                if m:
+                    dev_id = m.group(1)
+                    if dev_id not in found:
+                        log("[Scan]", f"EmotiBit found (regex): {dev_id} at {addr[0]}")
+                    found.add(dev_id)
         except socket.timeout:
             continue
     log("[Scan]", f"EmotiBit scan complete: {n_packets} packets, {len(found)} unique IDs: {found}")
