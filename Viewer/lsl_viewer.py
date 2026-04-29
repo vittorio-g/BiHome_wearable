@@ -1886,16 +1886,32 @@ class Viewer(QtWidgets.QMainWindow):
         self._last_refresh_ts = now
         dt_frame = min(dt_frame, 0.1)  # cap to avoid jumps after pause
 
+        # Smooth draw cursor: always advances at wall-clock rate so the
+        # X-axis NEVER pauses (which produces the visible "stutter" when
+        # the cursor catches up to a bursty data source like Polar's
+        # 560 ms notification interval). To avoid drawing a curve that
+        # ends ahead of the available data, we keep the cursor a fixed
+        # distance behind the latest sample (DISPLAY_LAG_S).
+        DISPLAY_LAG_S = 0.4  # 400 ms behind latest data — enough headroom
         stream_tend: Dict[str, float] = {}
         parts = []
         for key, st in self.streams.items():
             if st.latest_ts > 0:
                 target = st.latest_ts
-                cursor = self._draw_cursor.get(key, target)
-                # Advance cursor at real-time rate
-                cursor += dt_frame
-                # Never exceed actual data we have
-                cursor = min(cursor, target)
+                # Where we WANT the cursor: a fixed lag behind real data.
+                desired = target - DISPLAY_LAG_S
+                cursor = self._draw_cursor.get(key)
+                if cursor is None:
+                    cursor = desired
+                else:
+                    # Advance smoothly; if we've drifted more than 2 s
+                    # behind (e.g. unpause, network glitch) snap close.
+                    cursor += dt_frame
+                    if cursor < desired - 2.0:
+                        cursor = desired
+                # Never overrun the real data
+                if cursor > target:
+                    cursor = target
                 self._draw_cursor[key] = cursor
                 stream_tend[key] = cursor
                 parts.append(f"{st.name}: {(now - target) * 1000:.0f}ms")

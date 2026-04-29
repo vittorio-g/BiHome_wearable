@@ -543,6 +543,57 @@ class SignalFilter:
         self._buf = []
 
 
+class HighPassFilter:
+    """Single-pole IIR high-pass: y[n] = a*(y[n-1] + x[n] - x[n-1]).
+    Removes DC offset and slow baseline drift while preserving the AC
+    component. This is essential for PPG because raw EmotiBit values
+    have a huge DC baseline (~50,000+) and the pulse waveform is only
+    ~500 LSBs on top — without DC removal the plot looks flat.
+
+    a = exp(-2π * fc / fs).  fc = cutoff frequency.  fs = sample rate.
+    """
+    def __init__(self, cutoff_hz: float, fs_hz: float):
+        import math
+        self.alpha = math.exp(-2.0 * math.pi * cutoff_hz / fs_hz)
+        self._x_prev = 0.0
+        self._y_prev = 0.0
+        self._initialized = False
+
+    def apply(self, x: float) -> float:
+        import math
+        if math.isnan(x):
+            self._initialized = False
+            return x
+        if not self._initialized:
+            # Avoid huge initial transient by anchoring on first sample
+            self._x_prev = x
+            self._y_prev = 0.0
+            self._initialized = True
+            return 0.0
+        y = self.alpha * (self._y_prev + x - self._x_prev)
+        self._x_prev = x
+        self._y_prev = y
+        return y
+
+    def reset(self):
+        self._initialized = False
+
+
+class CompositeFilter:
+    """Chains multiple filters: output of stage N is input to stage N+1."""
+    def __init__(self, stages: list):
+        self._stages = stages
+    def apply(self, x: float) -> float:
+        v = x
+        for s in self._stages:
+            v = s.apply(v)
+        return v
+    def reset(self):
+        for s in self._stages:
+            try: s.reset()
+            except Exception: pass
+
+
 # =====================================================
 # Polar ECG imputer — R-peak template + RR prediction
 # =====================================================
@@ -1923,11 +1974,21 @@ class EmotiBitThread(threading.Thread):
         self.last_heartbeat_at: float = 0.0
         self._printed_first_data: bool = False
 
-        # One filter per PPG channel (ppg_0, ppg_1, ppg_2)
-        self._ppg_filters = (
-            [SignalFilter(PPG_FILTER_WEIGHTS) for _ in range(3)]
-            if ENABLE_SIGNAL_FILTER else None
-        )
+        # PPG processing chain: (1) high-pass to remove DC + slow drift,
+        # (2) light smoothing of the resulting AC signal.
+        # Without this the EmotiBit PPG plot looks flat because the
+        # pulse waveform (~500 LSB) sits on top of a ~50,000+ DC baseline.
+        # Cutoff 0.5 Hz removes DC + breathing artifacts, lets pulse pass.
+        if ENABLE_SIGNAL_FILTER:
+            self._ppg_filters = [
+                CompositeFilter([
+                    HighPassFilter(cutoff_hz=0.5, fs_hz=25.0),
+                    SignalFilter(PPG_FILTER_WEIGHTS),
+                ])
+                for _ in range(3)
+            ]
+        else:
+            self._ppg_filters = None
 
         self._board = None
         self._board_id = None
