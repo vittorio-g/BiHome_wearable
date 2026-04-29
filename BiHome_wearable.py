@@ -3511,6 +3511,17 @@ def main():
             f"polar={'ON ' if pc.polar_enabled else 'off'} ({pc.polar_name or '-'}, {pc.polar_address or '-'}) | "
             f"emotibit={'ON ' if pc.emotibit_enabled else 'off'} ({pc.emotibit_name or '-'}, {pc.emotibit_serial or '-'})")
 
+    # Write active participant IDs for the viewer (so it can match streams
+    # to participants reliably when the user uses non-standard codes like
+    # 'P1', 'Subject01' etc. that the regex fallback can't anchor on).
+    try:
+        import json as _json
+        active_pids_path = os.path.join(_WRITABLE_DIR, "active_participants.json")
+        with open(active_pids_path, "w") as f:
+            _json.dump([pc.participant_id for pc in configs], f)
+    except Exception as e:
+        log("[Main]", f"could not write active_participants.json: {e}")
+
     for pc in configs:
         pid = pc.participant_id
 

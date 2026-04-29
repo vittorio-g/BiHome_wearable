@@ -570,12 +570,46 @@ class MarkerConfigDialog(QtWidgets.QDialog):
         }
 
 
-_PID_RE = re.compile(r'^(P\d{2})_')
+# Active participant IDs are written to this file by BiHome_wearable.py
+# at startup so the viewer can match streams to participants without
+# guessing.  Falls back to a permissive regex when the file is missing.
+_ACTIVE_PIDS_FILE = os.path.join(_WRITABLE_DIR, "active_participants.json")
+
+def _load_active_pids() -> List[str]:
+    try:
+        with open(_ACTIVE_PIDS_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [str(x) for x in data]
+        if isinstance(data, dict):
+            return [str(x) for x in data.get("participants", [])]
+    except Exception:
+        pass
+    return []
+
+# Permissive fallback regex: any non-empty, non-underscore, non-whitespace
+# leading segment followed by an underscore.  Matches P1, P01, P001, S1,
+# Subject5, etc.  Used when the wizard's participant-ID file isn't found.
+_PID_RE = re.compile(r'^([^_\s]+)_')
 
 def extract_participant(stream_name: str) -> Tuple[str, str]:
     """Extract participant ID from stream name. Returns (pid, short_name).
-    E.g. 'P01_PolarH10_Sens' → ('P01', 'PolarH10_Sens').
-    Streams without prefix → ('', stream_name)."""
+
+    Strategy:
+      1. If the wizard wrote a list of active participants, prefer the
+         longest matching prefix from that list.
+      2. Otherwise, use the permissive regex (any leading word + '_').
+    Streams that don't match either rule return ('', stream_name) and
+    end up in the 'Other' group."""
+    # Try the explicit list first (most reliable)
+    pids = _load_active_pids()
+    if pids:
+        # Sort longest-first so 'P10' matches before 'P1'
+        for pid in sorted(pids, key=len, reverse=True):
+            prefix = pid + "_"
+            if stream_name.startswith(prefix):
+                return pid, stream_name[len(prefix):]
+    # Permissive regex fallback
     m = _PID_RE.match(stream_name)
     if m:
         return m.group(1), stream_name[m.end():]
