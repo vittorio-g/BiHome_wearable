@@ -643,14 +643,16 @@ class PolarECGImputer:
     MAX_DERIV_WIN = 3     # half-width for max-derivative check (samples, ~23ms)
     MAX_BEATS   = 8       # beats kept in template average
     MAX_RR_HIST = 10      # RR intervals kept for heart-rate estimate
-    WARMUP_S    = 3.0     # seconds at stream start during which is_beat is
+    WARMUP_S    = 2.0     # seconds at stream start during which is_beat is
                           # never emitted, so noise/movement artifacts at
                           # connection time don't pollute the visible
                           # markers.  The detector still RUNS during warmup
                           # so the EMA / template have data when warmup
                           # ends — only the OUTPUT is suppressed.
-    REQUIRE_RR_HIST = 2   # need this many valid RR intervals before
-                          # trusting the detector and emitting beats
+    REQUIRE_RR_HIST = 1   # need at least this many valid RR intervals
+                          # (= 2 consecutive detected peaks) before
+                          # emitting beats. Keep low so warmup actually
+                          # ends in noisy / weak-signal conditions.
 
     def __init__(self, max_gap_s: float = 4.0):
         self._max_gap   = max_gap_s
@@ -674,6 +676,10 @@ class PolarECGImputer:
         self._gap_start_ts: Optional[float] = None
         self._last_beat_output_ts: Optional[float] = None  # wall-clock guard for output
         self._stream_start_ts: Optional[float] = None  # first non-NaN ts seen
+        self._warmup_done_logged: bool = False
+        self._warmup_warn_logged: bool = False
+        # Cumulative count of internal peak detections (for diagnostics)
+        self._n_peaks_detected: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -721,10 +727,26 @@ class PolarECGImputer:
         # template still get populated — only the OUTPUT is gated, so any
         # noise / movement artifacts at connection time don't appear as
         # spurious beat markers.
+        elapsed_since_start = ts - self._stream_start_ts
         in_warmup = (
-            (ts - self._stream_start_ts) < self.WARMUP_S
+            elapsed_since_start < self.WARMUP_S
             or len(self._rr_hist) < self.REQUIRE_RR_HIST
         )
+        # Warn once if warmup is taking too long (bad signal / weak ECG)
+        if (in_warmup and not self._warmup_warn_logged
+                and elapsed_since_start > 8.0):
+            self._warmup_warn_logged = True
+            log("[Beat]",
+                f"WARNING: warmup not finishing after {elapsed_since_start:.1f}s "
+                f"— peaks detected so far: {self._n_peaks_detected}, "
+                f"RR intervals: {len(self._rr_hist)}. "
+                f"Check ECG signal quality / electrode contact.")
+        if not in_warmup and not self._warmup_done_logged:
+            self._warmup_done_logged = True
+            log("[Beat]",
+                f"Warmup complete after {elapsed_since_start:.1f}s "
+                f"(peaks: {self._n_peaks_detected}, RR: {len(self._rr_hist)}). "
+                f"Beat output enabled.")
 
         # Gap prediction: if no beat detected for > 1.8 × mean RR, advance the
         # expected beat position and mark this sample as a predicted beat.
@@ -845,6 +867,7 @@ class PolarECGImputer:
         self._peak_amp_ema = (amp if self._peak_amp_ema is None
                               else 0.8 * self._peak_amp_ema + 0.2 * amp)
 
+        self._n_peaks_detected += 1
         if self._last_peak_ts is not None:
             rr = peak_ts - self._last_peak_ts
             if self.MIN_RR_S <= rr <= self.MAX_RR_S:
