@@ -2506,10 +2506,7 @@ def run_device_scan_dialog(parent=None) -> dict:
     d.setFixedSize(440, 260)
     lay = Qw.QVBoxLayout(d); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(10)
 
-    title = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
-                      f"<span style='color:#888;'>Home</span>")
-    title.setTextFormat(Qc.Qt.RichText)
-    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; font-weight: 900;")
+    title = _wordmark_label(height=36)
     lay.addWidget(title)
     sub = Qw.QLabel("Scanning for known devices...")
     sub.setStyleSheet("font-size: 12px;"); lay.addWidget(sub)
@@ -2623,10 +2620,7 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     l1.setSpacing(12)
     l1.setContentsMargins(24, 24, 24, 24)
 
-    title = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
-                      f"<span style='color:#888;'>Home</span>")
-    title.setTextFormat(Qc.Qt.RichText)
-    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 28px; font-weight: 900;")
+    title = _wordmark_label(height=44)
     l1.addWidget(title)
     l1.addWidget(Qw.QLabel("How many participants?"))
 
@@ -2737,10 +2731,7 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
     l2.setSpacing(12)
     l2.setContentsMargins(24, 24, 24, 24)
 
-    title2 = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
-                       f"<span style='color:#888;'>Home</span>")
-    title2.setTextFormat(Qc.Qt.RichText)
-    title2.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; font-weight: 900;")
+    title2 = _wordmark_label(height=36)
     l2.addWidget(title2)
 
     # ── Detected devices panel ──
@@ -2997,10 +2988,7 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
     lay.setContentsMargins(24, 24, 24, 24)
     lay.setSpacing(12)
 
-    title = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
-                      f"<span style='color:#888;'>Home</span>")
-    title.setTextFormat(Qc.Qt.RichText)
-    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; font-weight: 900;")
+    title = _wordmark_label(height=36)
     lay.addWidget(title)
 
     status_lbl = Qw.QLabel("Connecting to devices...")

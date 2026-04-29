@@ -861,16 +861,20 @@ class Viewer(QtWidgets.QMainWindow):
         col1_w = QtWidgets.QWidget(); col1_w.setLayout(col1)
         col1_w.setMinimumWidth(240)
 
-        logo = QtWidgets.QLabel(
-            f"<span style='color:{ACCENT};'>Bi</span>"
-            f"<span style='color:#888888;'>Home</span>")
-        logo.setTextFormat(QtCore.Qt.RichText)
-        logo.setStyleSheet("""
-            font-family: 'Montserrat Black', 'Montserrat', sans-serif;
-            font-size: 28px; font-weight: 900;
-            letter-spacing: 1px;
-            padding-bottom: 2px;
-        """)
+        # BiHome wordmark from visual identity
+        logo = QtWidgets.QLabel()
+        wm_path = os.path.join(_HERE, "bihome_wordmark.png")
+        if os.path.isfile(wm_path):
+            pix = QtGui.QPixmap(wm_path).scaledToHeight(
+                42, QtCore.Qt.SmoothTransformation)
+            logo.setPixmap(pix)
+        else:
+            # Fallback to text if asset missing
+            logo.setText(f"<span style='color:{ACCENT};'>Bi</span>"
+                         f"<span style='color:#888888;'>Home</span>")
+            logo.setTextFormat(QtCore.Qt.RichText)
+            logo.setStyleSheet("font-family: 'Montserrat Black'; font-size: 28px; font-weight: 900;")
+        logo.setStyleSheet(logo.styleSheet() + " padding-bottom: 4px;")
         col1.addWidget(logo)
         sub = QtWidgets.QLabel("LSL Stream Viewer")
         sub.setStyleSheet(f"font-size: 11px; color: {GRAY}; padding-bottom: 6px;")
