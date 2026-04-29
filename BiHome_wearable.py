@@ -2020,6 +2020,7 @@ class EmotiBitThread(threading.Thread):
             return 0
         if count <= 0:
             return 0
+        self._drained[preset] = self._drained.get(preset, 0) + count
 
         try:
             data = self._board.get_board_data(count, preset)
@@ -2109,6 +2110,8 @@ class EmotiBitThread(threading.Thread):
                     pushed += 1
         except Exception:
             return pushed
+
+        self._pushed[preset] = self._pushed.get(preset, 0) + pushed
 
         if pushed > 0:
             now2 = float(local_clock())
@@ -2226,6 +2229,11 @@ class EmotiBitThread(threading.Thread):
             self._anchor = {0: None, 1: None, 2: None}
             # Per-preset gap counter for diagnostics
             self._gaps = {0: 0, 1: 0, 2: 0}
+            # Per-preset cumulative pushed counter
+            self._pushed = {0: 0, 1: 0, 2: 0}
+            # Per-preset cumulative drained sample count (from BrainFlow)
+            self._drained = {0: 0, 1: 0, 2: 0}
+            self._last_diag_at = 0.0
 
         except Exception as e:
             import traceback
@@ -2286,6 +2294,22 @@ class EmotiBitThread(threading.Thread):
                 self.health.set(state="ERROR", fatal_error=f"runtime error: {e}")
                 log("[EmotiBit]", f"ERROR: runtime exception ({e})")
                 break
+
+            # Periodic diagnostic: drained vs pushed per preset (every 3s).
+            # If drained is growing but pushed is 0, we know data flows from
+            # EmotiBit but our push path is broken. If both are 0, BrainFlow
+            # is alive but isn't receiving any UDP packets from EmotiBit.
+            try:
+                _now_diag = float(local_clock())
+                if _now_diag - self._last_diag_at >= 3.0:
+                    self._last_diag_at = _now_diag
+                    d, p = self._drained, self._pushed
+                    log("[EmotiBit]",
+                        f"counts — drained: IMU={d.get(0,0)} PPG={d.get(1,0)} ANC={d.get(2,0)}"
+                        f"  pushed: IMU={p.get(0,0)} PPG={p.get(1,0)} ANC={p.get(2,0)}"
+                        f"  ready={ready_event.is_set()}")
+            except Exception:
+                pass
 
             now = float(local_clock())
 
