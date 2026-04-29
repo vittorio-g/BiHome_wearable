@@ -170,6 +170,8 @@ def log(tag: str, msg: str) -> None:
 # =====================================================
 
 stop_event  = threading.Event()
+# Path used by the viewer to request BLE reconnect (e.g. after WiFi change)
+_RECONNECT_FLAG_FILE = "reconnect.flag"
 send_lock   = threading.Lock()
 ready_event = threading.Event()  # set quando tutti i dispositivi abilitati sono connessi
 
@@ -1486,6 +1488,12 @@ class BleakPolarThread(threading.Thread):
         )
         self._last_battery_pct: Optional[int] = None
 
+        # Forced reconnect (e.g. after a WiFi/network change). Set by the
+        # backend's flag-file watcher when the viewer's Refresh button is
+        # clicked. The async loop checks this and breaks out of the active
+        # BleakClient context, which triggers a clean disconnect+reconnect.
+        self._request_reconnect = threading.Event()
+
         # ECG filter + imputer — same as ArduinoUSBPolarThread
         self._polar_ecg_filters: Dict[str, SignalFilter] = (
             {lbl: SignalFilter(ECG_FILTER_WEIGHTS) for lbl in self.label_map}
@@ -1756,9 +1764,12 @@ class BleakPolarThread(threading.Thread):
                     except Exception as e:
                         log("[BleakPolar]", f"ACC start failed (non-critical): {e}")
 
-                    # Stay connected — poll until disconnect or stop
+                    # Stay connected — poll until disconnect, stop, or
+                    # forced reconnect (set by viewer's Refresh button)
                     last_stats = time.time()
-                    while not stop_event.is_set() and client.is_connected:
+                    while (not stop_event.is_set()
+                           and client.is_connected
+                           and not self._request_reconnect.is_set()):
                         await asyncio.sleep(0.1)
                         # Stats every 10s
                         now = time.time()
@@ -1773,7 +1784,10 @@ class BleakPolarThread(threading.Thread):
                             self._notif_count = 0
                             last_stats = now
 
-                    if not client.is_connected:
+                    if self._request_reconnect.is_set():
+                        self._request_reconnect.clear()
+                        log("[BleakPolar]", f"Reconnect requested for {self.address} — dropping connection")
+                    elif not client.is_connected:
                         log("[BleakPolar]", "Disconnected from Polar H10")
 
             except Exception as e:
@@ -1784,8 +1798,9 @@ class BleakPolarThread(threading.Thread):
 
             self.health.set(state="CONNECTING", detail="reconnecting in 2s...")
             log("[BleakPolar]", "Reconnecting in 2s...")
+            self._request_reconnect.clear()  # consume any stale request
             for _ in range(20):  # 2s in 0.1s increments
-                if stop_event.is_set():
+                if stop_event.is_set() or self._request_reconnect.is_set():
                     break
                 time.sleep(0.1)
 
@@ -2685,7 +2700,7 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
     detected_lay = Qw.QVBoxLayout(detected_box)
     detected_lay.setContentsMargins(12, 8, 12, 8); detected_lay.setSpacing(2)
     GREEN = "#3acc6c"
-    detected_hdr = Qw.QLabel("DETECTED ON NETWORK")
+    detected_hdr = Qw.QLabel("DEVICE AVAILABILITY  (informational — assignment below)")
     detected_hdr.setStyleSheet(f"color: {GRAY}; font-size: 9px; font-weight: bold; letter-spacing: 1px;")
     detected_lay.addWidget(detected_hdr)
     polar_summary_lines = []
@@ -3174,6 +3189,25 @@ def main():
 
     mon = SystemMonitorThread(monitor_devices)
     mon.start()
+
+    # Reconnect-flag watcher: when the viewer's Refresh button is clicked,
+    # it writes a flag file. We detect it here and signal each BLE thread
+    # to drop+reconnect (useful after WiFi network changes that hang BLE).
+    flag_path = os.path.join(_WRITABLE_DIR, _RECONNECT_FLAG_FILE)
+    def _watch_reconnect_flag():
+        while not stop_event.is_set():
+            try:
+                if os.path.exists(flag_path):
+                    try: os.remove(flag_path)
+                    except Exception: pass
+                    log("[Main]", "Refresh requested by viewer — resetting BLE connections")
+                    for t in threads:
+                        if hasattr(t, '_request_reconnect'):
+                            t._request_reconnect.set()
+            except Exception as e:
+                log("[Main]", f"reconnect-flag watcher error: {e}")
+            time.sleep(0.5)
+    threading.Thread(target=_watch_reconnect_flag, daemon=True).start()
 
     print(f"\n=== Acquisition running ({len(configs)} participants, {len(threads)} devices) ===")
     print("Active:", ", ".join(devices))

@@ -1275,9 +1275,20 @@ class Viewer(QtWidgets.QMainWindow):
             self._jump_to_live()
 
     def _on_refresh(self):
-        """Re-discover streams AND jump to live."""
+        """Re-discover LSL streams, jump to live, AND signal the backend
+        to reset BLE connections (useful after a WiFi network change
+        that may have stalled bleak inside an await)."""
         self._start_resolver()
         self._jump_to_live()
+        # Write reconnect.flag in writable dir so the backend's watcher
+        # picks it up and forces all BLE threads to drop+reconnect.
+        try:
+            flag_path = os.path.join(_WRITABLE_DIR, "reconnect.flag")
+            with open(flag_path, "w") as f:
+                f.write(str(time.time()))
+            print("[Refresh] Wrote reconnect flag for backend BLE reset")
+        except Exception as e:
+            print(f"[Refresh] Could not write reconnect flag: {e}")
 
     def _style_btn(self, btn, small=False):
         """Apply consistent button styling."""
