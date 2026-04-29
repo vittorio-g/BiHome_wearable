@@ -1808,7 +1808,10 @@ class BleakPolarThread(threading.Thread):
         log("[BleakPolar]", "Thread stopped.")
 
     def run(self):
-        if not ENABLE_BLEAK_POLAR:
+        # Multi-participant mode: the wizard explicitly spawns threads, so
+        # the global ENABLE_BLEAK_POLAR flag is only honoured when no
+        # participant_id is set (legacy path).
+        if not self.participant_id and not ENABLE_BLEAK_POLAR:
             return
         # bleak handles its own WinRT/COM initialization — we only need to
         # ensure asyncio uses the Proactor event loop on Windows. Do NOT
@@ -2042,7 +2045,10 @@ class EmotiBitThread(threading.Thread):
         return pushed
 
     def run(self):
-        if not ENABLE_EMOTIBIT:
+        # In multi-participant mode, the wizard explicitly creates threads
+        # for each enabled device — so the global ENABLE_EMOTIBIT flag is
+        # only honoured when no participant_id is set (legacy path).
+        if not self.participant_id and not ENABLE_EMOTIBIT:
             return
 
         self.health.set(state="CONNECTING", detail="importing brainflow")
@@ -2208,6 +2214,25 @@ class EmotiBitThread(threading.Thread):
 # =====================================================
 # Setup wizard (PyQt5 dialogs)
 # =====================================================
+
+def _wordmark_label(height: int = 36):
+    """Return a QLabel with the BiHome wordmark from visual identity,
+    scaled to the requested height. Falls back to bicolor text if the
+    image asset is missing."""
+    from PyQt5 import QtWidgets as Qw, QtGui as Qg, QtCore as Qc
+    lbl = Qw.QLabel()
+    wm_path = os.path.join(_ROOT_DIR, "Viewer", "bihome_wordmark.png")
+    if os.path.isfile(wm_path):
+        pix = Qg.QPixmap(wm_path).scaledToHeight(height, Qc.Qt.SmoothTransformation)
+        lbl.setPixmap(pix)
+    else:
+        lbl.setText("<span style='color:#05abc4;'>Bi</span>"
+                    "<span style='color:#888888;'>Home</span>")
+        lbl.setTextFormat(Qc.Qt.RichText)
+        lbl.setStyleSheet(f"font-family: 'Montserrat Black'; "
+                          f"font-size: {int(height * 0.85)}px; font-weight: 900;")
+    return lbl
+
 
 def _setup_qt_app():
     """Create and theme the QApplication for wizard dialogs."""
