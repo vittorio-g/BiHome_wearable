@@ -2641,24 +2641,28 @@ def _scan_emotibit_ids_with_count(timeout: float = 5.0):
 
 def _scan_emotibit_ids(timeout: float = 5.0) -> set:
     """Scan local network for EmotiBits via the advertising protocol.
-    Returns the set of device_id strings (e.g. 'MD-V6-0000089').
 
-    Note: this binds UDP port 3131. If EmotiBit Oscilloscope or any other
-    EmotiBit-host app is running, the bind will fail and we cannot scan."""
+    Uses ONE UDP socket bound to port 3131 for both sending the HELLO
+    broadcast AND receiving responses.  Critical: EmotiBit firmware
+    replies UNICAST back to the source IP+port of the HELLO.  If we
+    used two sockets (a separate ephemeral-port tx), the response
+    would go to the tx ephemeral port and our rx (bound to 3131)
+    would never see it — explaining why earlier scans saw only the
+    loopback echoes of our own broadcast and never the EmotiBit reply.
+
+    Returns the set of device_id strings (e.g. 'MD-V6-0000089')."""
     import socket
     found = set()
-    log("[Scan]", "EmotiBit: opening UDP 3131...")
+    log("[Scan]", "EmotiBit: opening UDP 3131 (single dual-purpose socket)...")
     try:
-        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        rx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        rx.bind(('', 3131))
-        rx.settimeout(0.5)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(('', 3131))
+        sock.settimeout(0.3)
     except OSError as e:
         log("[Scan]", f"Cannot bind UDP 3131 — close EmotiBit Oscilloscope and retry. ({e})")
         return set()
-    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
     HELLO = b"0,0,0,HE,1,100"
     # Compute subnet broadcast
@@ -2668,52 +2672,55 @@ def _scan_emotibit_ids(timeout: float = 5.0) -> set:
         local_ip = s.getsockname()[0]; s.close()
         bcast = '.'.join(local_ip.split('.')[:3]) + '.255'
     except Exception:
+        local_ip = ""
         bcast = '255.255.255.255'
 
-    log("[Scan]", f"EmotiBit: broadcasting HELLO on {bcast}:3131 for {timeout}s...")
+    log("[Scan]", f"EmotiBit: broadcasting HELLO on {bcast}:3131 for {timeout}s "
+                  f"(local_ip={local_ip})...")
     t0 = time.time()
     last_send = 0.0
     n_packets = 0
+    n_self_echo = 0
+    import re as _re
+    di_pattern = _re.compile(r'(MD-?V\d+-?\d+)')
     while time.time() - t0 < timeout:
         now = time.time()
         if now - last_send > 1.0:
             for tgt in (bcast, '255.255.255.255'):
                 try:
-                    tx.sendto(HELLO, (tgt, 3131))
+                    sock.sendto(HELLO, (tgt, 3131))
                 except Exception as e:
                     log("[Scan]", f"send error to {tgt}: {e}")
             last_send = now
         try:
-            data, addr = rx.recvfrom(4096)
+            data, addr = sock.recvfrom(4096)
             n_packets += 1
+            # Skip our own broadcast echo (loopback / our own NIC)
+            if addr[0] == local_ip or addr[0] == '127.0.0.1':
+                n_self_echo += 1
+                continue
             txt = data.decode('utf-8', errors='replace')
-            # DEBUG: print first 5 packets so we can see the actual format
-            if n_packets <= 5:
-                log("[Scan]", f"  pkt #{n_packets} from {addr[0]}: {txt[:200]!r}")
-            parts = [p.strip() for p in txt.split(',')]
+            if n_packets - n_self_echo <= 5:
+                log("[Scan]", f"  pkt from {addr[0]}: {txt[:200]!r}")
             # Try classic format: ...,DI,<id>,...
+            parts = [p.strip() for p in txt.split(',')]
+            dev_id = None
             for i, p in enumerate(parts):
                 if p == "DI" and i + 1 < len(parts):
                     dev_id = parts[i + 1]
-                    if dev_id not in found:
-                        log("[Scan]", f"EmotiBit found: {dev_id} at {addr[0]}")
-                    found.add(dev_id)
                     break
-            else:
-                # Fallback: search anywhere in text for "MD-V" pattern (EmotiBit ID)
-                import re as _re
-                m = _re.search(r'(MD-?V\d+-?\d+)', txt)
+            if not dev_id:
+                m = di_pattern.search(txt)
                 if m:
                     dev_id = m.group(1)
-                    if dev_id not in found:
-                        log("[Scan]", f"EmotiBit found (regex): {dev_id} at {addr[0]}")
-                    found.add(dev_id)
+            if dev_id and dev_id not in found:
+                log("[Scan]", f"EmotiBit found: {dev_id} at {addr[0]}")
+                found.add(dev_id)
         except socket.timeout:
             continue
-    log("[Scan]", f"EmotiBit scan complete: {n_packets} packets, {len(found)} unique IDs: {found}")
-    try: rx.close()
-    except Exception: pass
-    try: tx.close()
+    log("[Scan]", f"EmotiBit scan complete: {n_packets} packets total "
+                  f"({n_self_echo} self-echoes), {len(found)} unique IDs: {found}")
+    try: sock.close()
     except Exception: pass
     _scan_emotibit_ids._last_pkt_count = n_packets
     return found
