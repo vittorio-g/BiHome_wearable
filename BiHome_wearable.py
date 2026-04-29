@@ -86,8 +86,8 @@ KNOWN_POLAR = {
 }
 
 KNOWN_EMOTIBIT = {
-    "EmotiBit 1": ("MD-V6-0000089", ""),
-    "EmotiBit 2": ("MD-V6-0000482", ""),
+    "EmotiBit 1": ("MD-V6-0000482", ""),
+    "EmotiBit 2": ("MD-V6-0000089", ""),
 }
 
 # =====================================================
@@ -2330,8 +2330,10 @@ def _scan_emotibit_via_brainflow(timeout: float = 12.0) -> set:
     log("[Scan]", "EmotiBit: trying BrainFlow native discovery (firewall-friendly)...")
     import re as _re
     pattern = _re.compile(r"Found emotibit:\s*(\S+)")
-    # Up to 3 sequential prepare_session attempts so we can find multiple devices
-    for attempt in range(3):
+    # Multiple attempts to find different devices. Each attempt costs
+    # `timeout` seconds — keep small so the wizard stays responsive.
+    max_attempts = max(1, min(len(KNOWN_EMOTIBIT) + 1, 3))
+    for attempt in range(max_attempts):
         start_pos = 0
         try:
             if os.path.isfile(log_path):
@@ -2376,6 +2378,12 @@ def _scan_emotibit_via_brainflow(timeout: float = 12.0) -> set:
 
     return found
 
+
+def _scan_emotibit_ids_with_count(timeout: float = 5.0):
+    """Same as _scan_emotibit_ids but also returns total packet count.
+    Used to detect firewall blocks: 0 packets = firewall blocking."""
+    ids = _scan_emotibit_ids(timeout=timeout)
+    return ids, _scan_emotibit_ids._last_pkt_count
 
 def _scan_emotibit_ids(timeout: float = 5.0) -> set:
     """Scan local network for EmotiBits via the advertising protocol.
@@ -2453,7 +2461,9 @@ def _scan_emotibit_ids(timeout: float = 5.0) -> set:
     except Exception: pass
     try: tx.close()
     except Exception: pass
+    _scan_emotibit_ids._last_pkt_count = n_packets
     return found
+_scan_emotibit_ids._last_pkt_count = 0
 
 
 def run_device_scan_dialog(parent=None) -> dict:
@@ -2466,12 +2476,15 @@ def run_device_scan_dialog(parent=None) -> dict:
     GREEN = "#3acc6c"
 
     d = Qw.QDialog(parent)
+    d.setWindowFlags(d.windowFlags() & ~Qc.Qt.WindowContextHelpButtonHint)
     d.setWindowTitle("BiHome — Scanning")
     d.setFixedSize(440, 260)
     lay = Qw.QVBoxLayout(d); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(10)
 
-    title = Qw.QLabel("BiHome")
-    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; color: {ACCENT};")
+    title = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
+                      f"<span style='color:#888;'>Home</span>")
+    title.setTextFormat(Qc.Qt.RichText)
+    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; font-weight: 900;")
     lay.addWidget(title)
     sub = Qw.QLabel("Scanning for known devices...")
     sub.setStyleSheet("font-size: 12px;"); lay.addWidget(sub)
@@ -2516,11 +2529,17 @@ def run_device_scan_dialog(parent=None) -> dict:
         done_flags["polar"] = True
 
     def _emo_thread():
-        # First try raw UDP scan (fast). If nothing found, fall back to
-        # BrainFlow's native discovery which has a working firewall rule.
-        ids = _scan_emotibit_ids(timeout=5.0)
+        # Skip entirely if no EmotiBits are configured
+        if not KNOWN_EMOTIBIT:
+            done_flags["emotibit"] = True
+            return
+        # Raw UDP scan first (fast — 4s).  Falls back to BrainFlow native
+        # discovery (~15s) if no EmotiBit responded — this happens when
+        # the Windows firewall blocks Python from receiving inbound UDP.
+        ids = _scan_emotibit_ids(timeout=4.0)
         if not ids:
-            ids = _scan_emotibit_via_brainflow(timeout=12.0)
+            log("[Scan]", "No EmotiBit on UDP — falling back to BrainFlow native discovery...")
+            ids = _scan_emotibit_via_brainflow(timeout=15.0)
         for fname, entry in KNOWN_EMOTIBIT.items():
             sn = entry[0] if isinstance(entry, tuple) else entry
             if sn in ids:
@@ -2572,14 +2591,17 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
 
     # ── Dialog 1: Number of participants ──
     d1 = Qw.QDialog()
+    d1.setWindowFlags(d1.windowFlags() & ~Qc.Qt.WindowContextHelpButtonHint)
     d1.setWindowTitle("BiHome — Setup")
     d1.setFixedSize(380, 220)
     l1 = Qw.QVBoxLayout(d1)
     l1.setSpacing(12)
     l1.setContentsMargins(24, 24, 24, 24)
 
-    title = Qw.QLabel("BiHome")
-    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 28px; color: {ACCENT};")
+    title = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
+                      f"<span style='color:#888;'>Home</span>")
+    title.setTextFormat(Qc.Qt.RichText)
+    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 28px; font-weight: 900;")
     l1.addWidget(title)
     l1.addWidget(Qw.QLabel("How many participants?"))
 
@@ -2683,14 +2705,17 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
     from PyQt5 import QtWidgets as Qw, QtCore as Qc, QtGui as Qg
 
     d2 = Qw.QDialog()
+    d2.setWindowFlags(d2.windowFlags() & ~Qc.Qt.WindowContextHelpButtonHint)
     d2.setWindowTitle("BiHome — Device Assignment")
     d2.setMinimumWidth(620)
     l2 = Qw.QVBoxLayout(d2)
     l2.setSpacing(12)
     l2.setContentsMargins(24, 24, 24, 24)
 
-    title2 = Qw.QLabel("BiHome")
-    title2.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; color: {ACCENT};")
+    title2 = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
+                       f"<span style='color:#888;'>Home</span>")
+    title2.setTextFormat(Qc.Qt.RichText)
+    title2.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; font-weight: 900;")
     l2.addWidget(title2)
 
     # ── Detected devices panel ──
@@ -2940,14 +2965,17 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
     RED = "#e83a3a"
 
     d = Qw.QDialog()
+    d.setWindowFlags(d.windowFlags() & ~Qc.Qt.WindowContextHelpButtonHint)
     d.setWindowTitle("BiHome — Connecting")
     d.setMinimumSize(500, 400)
     lay = Qw.QVBoxLayout(d)
     lay.setContentsMargins(24, 24, 24, 24)
     lay.setSpacing(12)
 
-    title = Qw.QLabel("BiHome")
-    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; color: {ACCENT};")
+    title = Qw.QLabel(f"<span style='color:{ACCENT};'>Bi</span>"
+                      f"<span style='color:#888;'>Home</span>")
+    title.setTextFormat(Qc.Qt.RichText)
+    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; font-weight: 900;")
     lay.addWidget(title)
 
     status_lbl = Qw.QLabel("Connecting to devices...")
@@ -3126,6 +3154,13 @@ def main():
 
     # ── Create per-participant threads ──
     all_healths: Dict[str, DeviceHealth] = {}
+
+    log("[Main]", f"Wizard returned {len(configs)} participant config(s):")
+    for pc in configs:
+        log("[Main]",
+            f"  {pc.participant_id}: "
+            f"polar={'ON ' if pc.polar_enabled else 'off'} ({pc.polar_name or '-'}, {pc.polar_address or '-'}) | "
+            f"emotibit={'ON ' if pc.emotibit_enabled else 'off'} ({pc.emotibit_name or '-'}, {pc.emotibit_serial or '-'})")
 
     for pc in configs:
         pid = pc.participant_id

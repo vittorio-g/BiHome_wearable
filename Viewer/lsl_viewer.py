@@ -494,6 +494,7 @@ class MarkerConfigDialog(QtWidgets.QDialog):
     """Dialog to configure a new marker stream."""
     def __init__(self, parent=None, participant_ids: List[str] = None):
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("New Marker Stream")
         self.setMinimumWidth(400)
         lay = QtWidgets.QVBoxLayout(self)
@@ -860,11 +861,14 @@ class Viewer(QtWidgets.QMainWindow):
         col1_w = QtWidgets.QWidget(); col1_w.setLayout(col1)
         col1_w.setMinimumWidth(240)
 
-        logo = QtWidgets.QLabel("BiHome")
-        logo.setStyleSheet(f"""
+        logo = QtWidgets.QLabel(
+            f"<span style='color:{ACCENT};'>Bi</span>"
+            f"<span style='color:#888888;'>Home</span>")
+        logo.setTextFormat(QtCore.Qt.RichText)
+        logo.setStyleSheet("""
             font-family: 'Montserrat Black', 'Montserrat', sans-serif;
             font-size: 28px; font-weight: 900;
-            color: {ACCENT}; letter-spacing: 1px;
+            letter-spacing: 1px;
             padding-bottom: 2px;
         """)
         col1.addWidget(logo)
