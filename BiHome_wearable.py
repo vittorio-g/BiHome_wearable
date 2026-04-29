@@ -3441,9 +3441,59 @@ def run_connection_dialog(healths: Dict[str, DeviceHealth]) -> bool:
 # Main
 # =====================================================
 
+def _kill_zombie_python_instances():
+    """Find and terminate previous BiHome Python processes that are still
+    running. Otherwise their leftover BLE connections to the Polar holds
+    the radio busy and the new instance can't connect."""
+    if sys.platform != "win32":
+        return
+    my_pid = os.getpid()
+    try:
+        import subprocess as _sp
+        # List all python processes with start time
+        out = _sp.run(
+            ["wmic", "process", "where", "name='python.exe'",
+             "get", "ProcessId,CommandLine", "/format:csv"],
+            capture_output=True, text=True, timeout=5)
+        zombies = []
+        for line in out.stdout.splitlines():
+            line = line.strip()
+            if not line or "Node" in line:
+                continue
+            # csv format: Node,CommandLine,ProcessId
+            parts = line.split(',')
+            if len(parts) < 3:
+                continue
+            cmdline = parts[1] or ""
+            try:
+                pid = int(parts[-1])
+            except Exception:
+                continue
+            if pid == my_pid:
+                continue
+            # Only kill if it's running OUR script
+            if "BiHome_wearable" in cmdline or "lsl_viewer" in cmdline:
+                zombies.append((pid, cmdline[:80]))
+        if zombies:
+            log("[Main]", f"Found {len(zombies)} zombie BiHome process(es) — terminating:")
+            for pid, cmd in zombies:
+                log("[Main]", f"  killing PID {pid}: {cmd}")
+                try:
+                    _sp.run(["taskkill", "/F", "/PID", str(pid)],
+                            capture_output=True, timeout=3)
+                except Exception:
+                    pass
+            time.sleep(1.0)  # give Windows time to release BLE handles
+    except Exception as e:
+        log("[Main]", f"zombie cleanup skipped: {e}")
+
+
 def main():
     threads: List[threading.Thread] = []
     devices: List[str] = []
+
+    # ── Kill any leftover BiHome processes from previous runs ──
+    _kill_zombie_python_instances()
 
     # ── Run setup wizard ──
     configs = run_setup_wizard()
