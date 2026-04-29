@@ -2257,6 +2257,185 @@ class ParticipantConfig:
     emotibit_name: str = ""       # friendly name
 
 
+# =====================================================
+# Device discovery (BLE + UDP) for the wizard
+# =====================================================
+
+def _scan_polar_macs(timeout: float = 6.0) -> set:
+    """Scan BLE for nearby devices and return the set of MAC addresses
+    (uppercase, normalized) that appeared during the scan window."""
+    try:
+        import asyncio
+        from bleak import BleakScanner
+    except Exception as e:
+        log("[Scan]", f"bleak not available: {e}")
+        return set()
+
+    async def _scan():
+        try:
+            devs = await BleakScanner.discover(timeout=timeout)
+        except Exception as e:
+            log("[Scan]", f"BLE scan failed: {e}")
+            return []
+        return [d.address.upper() for d in devs if getattr(d, 'address', None)]
+
+    # Run in its own event loop (Proactor on Windows for WinRT BLE)
+    if sys.platform == "win32":
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except Exception:
+            pass
+    loop = asyncio.new_event_loop()
+    try:
+        addrs = loop.run_until_complete(_scan())
+    finally:
+        loop.close()
+    return set(addrs)
+
+def _scan_emotibit_ids(timeout: float = 5.0) -> set:
+    """Scan local network for EmotiBits via the advertising protocol.
+    Returns the set of device_id strings (e.g. 'MD-V6-0000089')."""
+    import socket
+    found = set()
+    try:
+        rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        rx.bind(('', 3131))
+        rx.settimeout(0.5)
+    except OSError as e:
+        log("[Scan]", f"Cannot bind UDP 3131 for EmotiBit scan: {e}")
+        return set()
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    HELLO = b"0,0,0,HE,1,100"
+    # Compute subnet broadcast
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        local_ip = s.getsockname()[0]; s.close()
+        bcast = '.'.join(local_ip.split('.')[:3]) + '.255'
+    except Exception:
+        bcast = '255.255.255.255'
+
+    t0 = time.time()
+    last_send = 0.0
+    while time.time() - t0 < timeout:
+        now = time.time()
+        if now - last_send > 1.0:
+            for tgt in (bcast, '255.255.255.255'):
+                try:
+                    tx.sendto(HELLO, (tgt, 3131))
+                except Exception:
+                    pass
+            last_send = now
+        try:
+            data, _ = rx.recvfrom(4096)
+            txt = data.decode('utf-8', errors='replace')
+            parts = [p.strip() for p in txt.split(',')]
+            for i, p in enumerate(parts):
+                if p == "DI" and i + 1 < len(parts):
+                    found.add(parts[i + 1])
+                    break
+        except socket.timeout:
+            continue
+    try: rx.close()
+    except Exception: pass
+    try: tx.close()
+    except Exception: pass
+    return found
+
+
+def run_device_scan_dialog(parent=None) -> dict:
+    """Show a 'Scanning for devices...' dialog and return:
+    {'polar': set(known polar names found),
+     'emotibit': set(known emotibit names found)}"""
+    from PyQt5 import QtWidgets as Qw, QtCore as Qc
+    app = Qw.QApplication.instance() or _setup_qt_app()
+    ACCENT = "#05abc4"; BORDER = "#2a3340"; TEXT = "#e8ecf0"; GRAY = "#657179"
+    GREEN = "#3acc6c"
+
+    d = Qw.QDialog(parent)
+    d.setWindowTitle("BiHome — Scanning")
+    d.setFixedSize(440, 260)
+    lay = Qw.QVBoxLayout(d); lay.setContentsMargins(24, 24, 24, 24); lay.setSpacing(10)
+
+    title = Qw.QLabel("BiHome")
+    title.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; color: {ACCENT};")
+    lay.addWidget(title)
+    sub = Qw.QLabel("Scanning for known devices...")
+    sub.setStyleSheet("font-size: 12px;"); lay.addWidget(sub)
+
+    pbar = Qw.QProgressBar()
+    pbar.setRange(0, 0)  # indeterminate while scanning
+    pbar.setStyleSheet(f"""
+        QProgressBar {{ border: 1px solid {BORDER}; border-radius: 6px;
+                        background: #252d38; height: 16px; }}
+        QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
+    """)
+    lay.addWidget(pbar)
+
+    polar_lbl = Qw.QLabel("○ Polar (BLE):     scanning...")
+    polar_lbl.setStyleSheet(f"font-size: 11px; color: {GRAY};")
+    lay.addWidget(polar_lbl)
+    emo_lbl = Qw.QLabel("○ EmotiBit (WiFi): scanning...")
+    emo_lbl.setStyleSheet(f"font-size: 11px; color: {GRAY};")
+    lay.addWidget(emo_lbl)
+
+    skip_btn = Qw.QPushButton("Skip scan")
+    skip_btn.setStyleSheet(f"""
+        QPushButton {{ background: #1e252e; color: {TEXT}; border: 1px solid {BORDER};
+                       border-radius: 4px; padding: 6px 16px; }}
+        QPushButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}
+    """)
+    skip_btn.clicked.connect(d.reject)
+    lay.addStretch()
+    lay.addWidget(skip_btn, alignment=Qc.Qt.AlignRight)
+
+    # Run scans in background threads
+    results = {"polar": set(), "emotibit": set()}
+    done_flags = {"polar": False, "emotibit": False}
+
+    def _polar_thread():
+        macs = _scan_polar_macs(timeout=6.0)
+        macs_norm = {m.upper().replace("-", ":") for m in macs}
+        for fname, entry in KNOWN_POLAR.items():
+            addr = entry[0] if isinstance(entry, tuple) else entry
+            if addr.upper().replace("-", ":") in macs_norm:
+                results["polar"].add(fname)
+        done_flags["polar"] = True
+
+    def _emo_thread():
+        ids = _scan_emotibit_ids(timeout=5.0)
+        for fname, entry in KNOWN_EMOTIBIT.items():
+            sn = entry[0] if isinstance(entry, tuple) else entry
+            if sn in ids:
+                results["emotibit"].add(fname)
+        done_flags["emotibit"] = True
+
+    th1 = threading.Thread(target=_polar_thread, daemon=True); th1.start()
+    th2 = threading.Thread(target=_emo_thread, daemon=True); th2.start()
+
+    def _poll():
+        if done_flags["polar"]:
+            n = len(results["polar"])
+            polar_lbl.setText(f"● Polar (BLE):     {n} found")
+            polar_lbl.setStyleSheet(f"font-size: 11px; color: {GREEN if n else GRAY};")
+        if done_flags["emotibit"]:
+            n = len(results["emotibit"])
+            emo_lbl.setText(f"● EmotiBit (WiFi): {n} found")
+            emo_lbl.setStyleSheet(f"font-size: 11px; color: {GREEN if n else GRAY};")
+        if all(done_flags.values()):
+            pbar.setRange(0, 1); pbar.setValue(1)
+            Qc.QTimer.singleShot(500, d.accept)
+
+    timer = Qc.QTimer(); timer.timeout.connect(_poll); timer.start(300)
+    d.exec_()
+    timer.stop()
+    return results
+
+
 def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     """Run the multi-participant setup wizard. Returns config list or None if cancelled."""
     from PyQt5 import QtWidgets as Qw, QtGui as Qg, QtCore as Qc
@@ -2364,10 +2543,15 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
         return None
     n_participants = spin.value()
 
+    # ── Discover devices on BLE + WiFi ──
+    discovered = run_device_scan_dialog()
+    polar_online = discovered.get("polar", set())
+    emo_online = discovered.get("emotibit", set())
+
     # ── Dialog 2: Device assignment ──
     d2 = Qw.QDialog()
     d2.setWindowTitle("BiHome — Device Assignment")
-    d2.setMinimumWidth(550)
+    d2.setMinimumWidth(620)
     l2 = Qw.QVBoxLayout(d2)
     l2.setSpacing(12)
     l2.setContentsMargins(24, 24, 24, 24)
@@ -2375,6 +2559,53 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
     title2 = Qw.QLabel("BiHome")
     title2.setStyleSheet(f"font-family: 'Montserrat Black'; font-size: 24px; color: {ACCENT};")
     l2.addWidget(title2)
+
+    # ── Detected devices panel ──
+    detected_box = Qw.QFrame()
+    detected_box.setStyleSheet(
+        f"QFrame {{ background: #171d24; border: 1px solid {BORDER}; border-radius: 6px; }}")
+    detected_lay = Qw.QVBoxLayout(detected_box)
+    detected_lay.setContentsMargins(12, 8, 12, 8); detected_lay.setSpacing(2)
+    GREEN = "#3acc6c"
+    detected_hdr = Qw.QLabel("DETECTED ON NETWORK")
+    detected_hdr.setStyleSheet(f"color: {GRAY}; font-size: 9px; font-weight: bold; letter-spacing: 1px;")
+    detected_lay.addWidget(detected_hdr)
+    polar_summary_lines = []
+    for fname in KNOWN_POLAR:
+        online = fname in polar_online
+        polar_summary_lines.append(f"  {'●' if online else '○'} <b>{fname}</b> "
+                                    f"<span style='color:{GREEN if online else GRAY};'>"
+                                    f"{'detected' if online else 'offline'}</span>")
+    emo_summary_lines = []
+    for fname in KNOWN_EMOTIBIT:
+        online = fname in emo_online
+        emo_summary_lines.append(f"  {'●' if online else '○'} <b>{fname}</b> "
+                                  f"<span style='color:{GREEN if online else GRAY};'>"
+                                  f"{'detected' if online else 'offline'}</span>")
+    if not polar_summary_lines and not emo_summary_lines:
+        info = Qw.QLabel("No known devices configured.")
+        info.setStyleSheet(f"color: {GRAY}; font-size: 11px;")
+        detected_lay.addWidget(info)
+    else:
+        if polar_summary_lines:
+            lbl = Qw.QLabel("<b style='color:#888;'>Polar (BLE):</b><br>" +
+                            "<br>".join(polar_summary_lines))
+            lbl.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+            detected_lay.addWidget(lbl)
+        if emo_summary_lines:
+            lbl = Qw.QLabel("<b style='color:#888;'>EmotiBit (WiFi):</b><br>" +
+                            "<br>".join(emo_summary_lines))
+            lbl.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+            detected_lay.addWidget(lbl)
+    rescan_btn = Qw.QPushButton("Rescan")
+    rescan_btn.setStyleSheet(
+        f"QPushButton {{ background: transparent; color: {GRAY}; border: none; "
+        f"text-align: right; font-size: 10px; }} "
+        f"QPushButton:hover {{ color: {ACCENT}; }}")
+    rescan_btn.clicked.connect(lambda: (d2.reject(), d2.setProperty("rescan", True)))
+    detected_lay.addWidget(rescan_btn, alignment=Qc.Qt.AlignRight)
+    l2.addWidget(detected_box)
+
     l2.addWidget(Qw.QLabel("Assign devices to each participant:"))
 
     grid = Qw.QGridLayout()
@@ -2413,18 +2644,36 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
         grid.addWidget(code_edit, pi + 1, 0)
         code_edits.append(code_edit)
 
+        # Build decorated items: "● name" if online else "○ name (offline)"
+        polar_items = []
+        for n in polar_names:
+            polar_items.append(f"● {n}" if n in polar_online else f"○ {n} (offline)")
+        emo_items = []
+        for n in emotibit_names:
+            emo_items.append(f"● {n}" if n in emo_online else f"○ {n} (offline)")
+
         # Polar checkbox + combo
         pcb = Qw.QCheckBox()
-        pcb.setChecked(saved.get(f"polar_enabled_{pi}", len(polar_names) > 0))
+        # Default-on only if at least one is online
+        pcb.setChecked(saved.get(f"polar_enabled_{pi}", len(polar_online) > 0))
         grid.addWidget(pcb, pi + 1, 1)
         pcombo = Qw.QComboBox()
-        pcombo.addItems(polar_names if polar_names else ["(no Polar found)"])
+        pcombo.addItems(polar_items if polar_items else ["(no Polar configured)"])
         pcombo.setStyleSheet(combo_style)
+        # Default selection: prefer online, then saved, then index pi
         saved_pname = saved.get(f"polar_name_{pi}", "")
+        chosen_idx = -1
         if saved_pname and saved_pname in polar_names:
-            pcombo.setCurrentText(saved_pname)
-        elif pi < len(polar_names):
-            pcombo.setCurrentIndex(pi)
+            chosen_idx = polar_names.index(saved_pname)
+        else:
+            # Pick the pi-th online device, falling back to pi-th overall
+            online_list = [i for i, n in enumerate(polar_names) if n in polar_online]
+            if pi < len(online_list):
+                chosen_idx = online_list[pi]
+            elif pi < len(polar_names):
+                chosen_idx = pi
+        if chosen_idx >= 0:
+            pcombo.setCurrentIndex(chosen_idx)
         pcb.toggled.connect(pcombo.setEnabled)
         pcombo.setEnabled(pcb.isChecked())
         grid.addWidget(pcombo, pi + 1, 2)
@@ -2432,16 +2681,23 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
 
         # EmotiBit checkbox + combo
         ecb = Qw.QCheckBox()
-        ecb.setChecked(saved.get(f"emo_enabled_{pi}", len(emotibit_names) > 0))
+        ecb.setChecked(saved.get(f"emo_enabled_{pi}", len(emo_online) > 0))
         grid.addWidget(ecb, pi + 1, 3)
         ecombo = Qw.QComboBox()
-        ecombo.addItems(emotibit_names if emotibit_names else ["(no EmotiBit found)"])
+        ecombo.addItems(emo_items if emo_items else ["(no EmotiBit configured)"])
         ecombo.setStyleSheet(combo_style)
         saved_ename = saved.get(f"emo_name_{pi}", "")
+        chosen_idx = -1
         if saved_ename and saved_ename in emotibit_names:
-            ecombo.setCurrentText(saved_ename)
-        elif pi < len(emotibit_names):
-            ecombo.setCurrentIndex(pi)
+            chosen_idx = emotibit_names.index(saved_ename)
+        else:
+            online_list = [i for i, n in enumerate(emotibit_names) if n in emo_online]
+            if pi < len(online_list):
+                chosen_idx = online_list[pi]
+            elif pi < len(emotibit_names):
+                chosen_idx = pi
+        if chosen_idx >= 0:
+            ecombo.setCurrentIndex(chosen_idx)
         ecb.toggled.connect(ecombo.setEnabled)
         ecombo.setEnabled(ecb.isChecked())
         grid.addWidget(ecombo, pi + 1, 4)
@@ -2472,17 +2728,23 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
 
         pc = ParticipantConfig(participant_id=code)
         if polar_cbs[pi].isChecked() and polar_names:
-            pname = polar_combos[pi].currentText()
-            pc.polar_enabled = True
-            pc.polar_name = pname
-            entry = KNOWN_POLAR.get(pname, ("", ""))
-            pc.polar_address = entry[0] if isinstance(entry, tuple) else entry
+            # Combo items are decorated ("● Polar 1" / "○ Polar 1 (offline)") —
+            # use the index to recover the plain name
+            idx = polar_combos[pi].currentIndex()
+            if 0 <= idx < len(polar_names):
+                pname = polar_names[idx]
+                pc.polar_enabled = True
+                pc.polar_name = pname
+                entry = KNOWN_POLAR.get(pname, ("", ""))
+                pc.polar_address = entry[0] if isinstance(entry, tuple) else entry
         if emo_cbs[pi].isChecked() and emotibit_names:
-            ename = emo_combos[pi].currentText()
-            pc.emotibit_enabled = True
-            pc.emotibit_name = ename
-            entry = KNOWN_EMOTIBIT.get(ename, ("", ""))
-            pc.emotibit_serial = entry[0] if isinstance(entry, tuple) else entry
+            idx = emo_combos[pi].currentIndex()
+            if 0 <= idx < len(emotibit_names):
+                ename = emotibit_names[idx]
+                pc.emotibit_enabled = True
+                pc.emotibit_name = ename
+                entry = KNOWN_EMOTIBIT.get(ename, ("", ""))
+                pc.emotibit_serial = entry[0] if isinstance(entry, tuple) else entry
         configs.append(pc)
 
     # Persist wizard state for next session
