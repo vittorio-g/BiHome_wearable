@@ -2105,9 +2105,13 @@ class EmotiBitThread(threading.Thread):
                 if filters is not None:
                     vals = [filters[j].apply(vals[j])
                             for j in range(min(len(filters), n_ch))]
-                if ready_event.is_set():
-                    outlet.push_sample(vals, timestamp=float(ts_per[i]))
-                    pushed += 1
+                # Note: previously gated on ready_event.is_set(), but in
+                # multi-participant mode the connection dialog already acts
+                # as the sync gate and ready_event is set by SystemMonitor
+                # which only runs AFTER the dialog closes — chicken-and-egg.
+                # Polar (BleakPolarThread) doesn't gate either, so we don't.
+                outlet.push_sample(vals, timestamp=float(ts_per[i]))
+                pushed += 1
         except Exception:
             return pushed
 
