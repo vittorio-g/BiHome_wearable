@@ -2292,6 +2292,76 @@ def _scan_polar_macs(timeout: float = 6.0) -> set:
         loop.close()
     return set(addrs)
 
+def _scan_emotibit_via_brainflow(timeout: float = 12.0) -> set:
+    """Fallback: use BrainFlow native discovery when raw UDP is blocked
+    by the Windows firewall. BrainFlow's DLL has a valid firewall rule.
+    Returns the set of EmotiBit device IDs found."""
+    found = set()
+    try:
+        from brainflow.board_shim import (BoardShim, BrainFlowInputParams,
+                                           BoardIds, LogLevels)
+    except Exception as e:
+        log("[Scan]", f"BrainFlow not available for EmotiBit scan: {e}")
+        return found
+
+    log_path = os.path.join(_WRITABLE_DIR, "_scan_bf.log")
+    try:
+        BoardShim.set_log_level(LogLevels.LEVEL_TRACE.value)
+        BoardShim.enable_dev_board_logger()
+        BoardShim.set_log_file(log_path)
+    except Exception:
+        pass
+
+    log("[Scan]", "EmotiBit: trying BrainFlow native discovery (firewall-friendly)...")
+    import re as _re
+    pattern = _re.compile(r"Found emotibit:\s*(\S+)")
+    # Up to 3 sequential prepare_session attempts so we can find multiple devices
+    for attempt in range(3):
+        start_pos = 0
+        try:
+            if os.path.isfile(log_path):
+                start_pos = os.path.getsize(log_path)
+        except Exception:
+            pass
+
+        params = BrainFlowInputParams()
+        try:
+            params.timeout = int(timeout)
+        except Exception:
+            pass
+        board = None
+        try:
+            board = BoardShim(BoardIds.EMOTIBIT_BOARD.value, params)
+            board.prepare_session()
+        except Exception as e:
+            log("[Scan]", f"BrainFlow attempt {attempt+1}: {e}")
+            break
+
+        # Read new log content
+        try:
+            with open(log_path, 'r', errors='replace') as f:
+                f.seek(start_pos)
+                txt = f.read()
+        except Exception:
+            txt = ""
+        new_ids = set(pattern.findall(txt))
+        for did in new_ids:
+            if did not in found:
+                log("[Scan]", f"  EmotiBit detected via BrainFlow: {did}")
+            found.add(did)
+
+        try:
+            if board is not None:
+                board.release_session()
+        except Exception:
+            pass
+        time.sleep(0.5)
+        if not new_ids:
+            break  # no more devices
+
+    return found
+
+
 def _scan_emotibit_ids(timeout: float = 5.0) -> set:
     """Scan local network for EmotiBits via the advertising protocol.
     Returns the set of device_id strings (e.g. 'MD-V6-0000089').
@@ -2431,7 +2501,11 @@ def run_device_scan_dialog(parent=None) -> dict:
         done_flags["polar"] = True
 
     def _emo_thread():
+        # First try raw UDP scan (fast). If nothing found, fall back to
+        # BrainFlow's native discovery which has a working firewall rule.
         ids = _scan_emotibit_ids(timeout=5.0)
+        if not ids:
+            ids = _scan_emotibit_via_brainflow(timeout=12.0)
         for fname, entry in KNOWN_EMOTIBIT.items():
             sn = entry[0] if isinstance(entry, tuple) else entry
             if sn in ids:
