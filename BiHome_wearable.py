@@ -2935,8 +2935,13 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
 
     grid = Qw.QGridLayout()
     grid.setSpacing(8)
-    # Header
-    for ci, h in enumerate(["Code", "Polar H10", "", "EmotiBit", ""]):
+    # Three columns: Code | Polar H10 | EmotiBit. Each device cell holds
+    # a checkbox + combobox side-by-side (no gap between them) so the
+    # dropdown is visually associated with its column header.
+    grid.setColumnStretch(0, 0)
+    grid.setColumnStretch(1, 1)
+    grid.setColumnStretch(2, 1)
+    for ci, h in enumerate(["Code", "Polar H10", "EmotiBit"]):
         lbl = Qw.QLabel(h)
         lbl.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-weight: bold;")
         grid.addWidget(lbl, 0, ci)
@@ -2977,21 +2982,28 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
         for n in emotibit_names:
             emo_items.append(f"● {n}" if n in emo_online else f"○ {n} (offline)")
 
+        # Helper: build a [checkbox][combo] cell tightly side-by-side so
+        # the dropdown reads as belonging to the column header above it.
+        def _make_device_cell(checkbox, combo):
+            host = Qw.QWidget()
+            hl = Qw.QHBoxLayout(host)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(6)
+            hl.addWidget(checkbox)
+            hl.addWidget(combo, stretch=1)
+            return host
+
         # Polar checkbox + combo
         pcb = Qw.QCheckBox()
-        # Default-on only if at least one is online
         pcb.setChecked(saved.get(f"polar_enabled_{pi}", len(polar_online) > 0))
-        grid.addWidget(pcb, pi + 1, 1)
         pcombo = Qw.QComboBox()
         pcombo.addItems(polar_items if polar_items else ["(no Polar configured)"])
         pcombo.setStyleSheet(combo_style)
-        # Default selection: prefer online, then saved, then index pi
         saved_pname = saved.get(f"polar_name_{pi}", "")
         chosen_idx = -1
         if saved_pname and saved_pname in polar_names:
             chosen_idx = polar_names.index(saved_pname)
         else:
-            # Pick the pi-th online device, falling back to pi-th overall
             online_list = [i for i, n in enumerate(polar_names) if n in polar_online]
             if pi < len(online_list):
                 chosen_idx = online_list[pi]
@@ -3001,13 +3013,12 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
             pcombo.setCurrentIndex(chosen_idx)
         pcb.toggled.connect(pcombo.setEnabled)
         pcombo.setEnabled(pcb.isChecked())
-        grid.addWidget(pcombo, pi + 1, 2)
+        grid.addWidget(_make_device_cell(pcb, pcombo), pi + 1, 1)
         polar_cbs.append(pcb); polar_combos.append(pcombo)
 
         # EmotiBit checkbox + combo
         ecb = Qw.QCheckBox()
         ecb.setChecked(saved.get(f"emo_enabled_{pi}", len(emo_online) > 0))
-        grid.addWidget(ecb, pi + 1, 3)
         ecombo = Qw.QComboBox()
         ecombo.addItems(emo_items if emo_items else ["(no EmotiBit configured)"])
         ecombo.setStyleSheet(combo_style)
@@ -3025,7 +3036,7 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
             ecombo.setCurrentIndex(chosen_idx)
         ecb.toggled.connect(ecombo.setEnabled)
         ecombo.setEnabled(ecb.isChecked())
-        grid.addWidget(ecombo, pi + 1, 4)
+        grid.addWidget(_make_device_cell(ecb, ecombo), pi + 1, 2)
         emo_cbs.append(ecb); emo_combos.append(ecombo)
 
     l2.addLayout(grid)
