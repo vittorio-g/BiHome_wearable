@@ -1986,7 +1986,34 @@ class EmotiBitThread(threading.Thread):
         except Exception:
             pass
 
-    def _drain_and_push(self, preset: int, ts_row: int, indices: List[int], outlet: StreamOutlet, label: str, filters=None) -> int:
+    def _drain_and_push(self, preset: int, ts_row: int, pkg_row,
+                         indices: List[int], outlet: StreamOutlet,
+                         label: str, native_fs: float,
+                         filters=None,
+                         post_smooth_indices: List[int] = None) -> int:
+        """Drain one BrainFlow preset's ring buffer and push samples to LSL
+        with monotonic, native-rate timestamps.
+
+        BrainFlow's stock timestamp column is the host wall clock at the
+        moment data arrived from the EmotiBit, which makes ALL samples in
+        a single UDP packet share one timestamp (stair-stepped).  We
+        instead use the package-number column to derive per-sample
+        timestamps at the true native rate, which makes the time axis
+        monotonic and uniform — matching what EmotiBit Oscilloscope shows.
+
+        Args:
+            preset:        BrainFlowPresets enum int
+            ts_row:        row index of BrainFlow timestamp (host)
+            pkg_row:       row index of EmotiBit package-number, or None
+            indices:       list of channel row indices to push
+            outlet:        LSL outlet to push samples to
+            label:         human-readable preset name (logging)
+            native_fs:     native sampling rate (Hz) for ts synthesis
+            filters:       optional list of SignalFilter, one per index
+            post_smooth_indices: indices (within `indices`) of channels
+                                 whose adjacent-pair stair-step should be
+                                 smoothed (e.g. temperature 2x sample-and-hold)
+        """
         try:
             count = int(self._board.get_board_data_count(preset))
         except Exception:
@@ -2003,44 +2030,93 @@ class EmotiBitThread(threading.Thread):
             import numpy as np
             data = np.asarray(data)
         except Exception:
-            pass
-
-        try:
-            ts = data[ts_row]
-            sig = data[indices]
-        except Exception:
             return 0
 
-        try:
-            t_dev_last = float(ts[-1])
-        except Exception:
+        if data.ndim != 2 or data.shape[1] == 0:
             return 0
 
+        # ── 1. Sort by package number (UDP can arrive out of order) ──
+        if pkg_row is not None and pkg_row < data.shape[0]:
+            pkg = data[pkg_row].astype(np.int64)
+            if len(pkg) > 1:
+                order = np.argsort(pkg, kind='stable')
+                data = data[:, order]
+                pkg = pkg[order]
+            # Dedupe: keep first occurrence of each package number
+            _, uniq_idx = np.unique(pkg, return_index=True)
+            uniq_idx = np.sort(uniq_idx)
+            data = data[:, uniq_idx]
+            pkg = pkg[uniq_idx]
+        else:
+            pkg = None
+
+        n_samp = int(data.shape[1])
+        if n_samp == 0:
+            return 0
+
+        # ── 2. Synthesize per-sample timestamps at native rate ──
         host_now = float(local_clock())
-        self._update_clock(t_dev_last, host_now)
+        try:
+            t_dev_last = float(data[ts_row, -1])
+            self._update_clock(t_dev_last, host_now)
+            t_dev_first = float(data[ts_row, 0])
+        except Exception:
+            t_dev_first = host_now
+            t_dev_last = host_now
 
+        # Anchor host time at first sample of this batch (using BrainFlow's
+        # ts as reference, then offset to host clock domain via clock EMA).
+        host_first = self._dev_to_host(t_dev_first, host_now)
+
+        if pkg is not None and len(pkg) > 1:
+            # Use package-number deltas relative to first sample
+            pkg_origin = pkg[0]
+            ts_per = host_first + (pkg - pkg_origin).astype(np.float64) / native_fs
+            # Detect gaps
+            n_gaps = int(((np.diff(pkg) - 1) > 0).sum())
+            if n_gaps > 0:
+                self._gaps[preset] += n_gaps
+        else:
+            # Fallback: linear interpolation between first/last BrainFlow ts
+            host_last = self._dev_to_host(t_dev_last, host_now)
+            ts_per = np.linspace(host_first, host_last, n_samp)
+
+        # ── 3. Smooth stair-step on specified columns (e.g. temperature) ──
+        # BrainFlow upsamples 7.5 Hz temperature to 15 Hz by sample-and-hold.
+        # A 2-tap moving average breaks the step pattern without phase shift
+        # mismatches against EDA at 15 Hz.
+        if post_smooth_indices:
+            for ci in post_smooth_indices:
+                if 0 <= ci < len(indices):
+                    row = indices[ci]
+                    col = data[row].astype(np.float64)
+                    # 2-tap MA causal: y[i] = (x[i] + x[i-1]) / 2
+                    smoothed = col.copy()
+                    smoothed[1:] = (col[1:] + col[:-1]) * 0.5
+                    data[row] = smoothed
+
+        # ── 4. Push samples to LSL ──
+        n_ch = len(indices)
         pushed = 0
         try:
-            n_ch = len(indices)
-            n_samp = int(len(ts))
             for i in range(n_samp):
-                t_dev = float(ts[i])
-                ts_host = self._dev_to_host(t_dev, host_now)
-                vals = [float(sig[j][i]) for j in range(n_ch)]
+                vals = [float(data[indices[j], i]) for j in range(n_ch)]
                 if filters is not None:
-                    vals = [filters[j].apply(vals[j]) for j in range(min(len(filters), n_ch))]
+                    vals = [filters[j].apply(vals[j])
+                            for j in range(min(len(filters), n_ch))]
                 if ready_event.is_set():
-                    outlet.push_sample(vals, timestamp=float(ts_host))
+                    outlet.push_sample(vals, timestamp=float(ts_per[i]))
                     pushed += 1
         except Exception:
             return pushed
 
-        now2 = float(local_clock())
-        self.last_data_at = now2
-        self.health.set(last_data_at=now2, first_data=True, detail="streaming")
-        if not self._printed_first_data and pushed > 0:
-            log("[EmotiBit]", f"FIRST DATA pushed ({label}). Streaming to LSL.")
-            self._printed_first_data = True
+        if pushed > 0:
+            now2 = float(local_clock())
+            self.last_data_at = now2
+            self.health.set(last_data_at=now2, first_data=True, detail="streaming")
+            if not self._printed_first_data:
+                log("[EmotiBit]", f"FIRST DATA pushed ({label}, n={pushed}). Streaming to LSL.")
+                self._printed_first_data = True
 
         return pushed
 
@@ -2124,6 +2200,33 @@ class EmotiBitThread(threading.Thread):
             self._ts_aux = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.AUXILIARY_PRESET)
             self._ts_anc = BoardShim.get_timestamp_channel(bid, BrainFlowPresets.ANCILLARY_PRESET)
 
+            # Package-number column per preset — used to sort UDP packets that
+            # arrive out of order, dedupe, and detect dropped frames.
+            def _pkg_or_none(preset):
+                try:
+                    return int(BoardShim.get_package_num_channel(bid, preset))
+                except Exception:
+                    return None
+            self._pkg_default = _pkg_or_none(BrainFlowPresets.DEFAULT_PRESET)
+            self._pkg_aux     = _pkg_or_none(BrainFlowPresets.AUXILIARY_PRESET)
+            self._pkg_anc     = _pkg_or_none(BrainFlowPresets.ANCILLARY_PRESET)
+
+            # Native sampling rates per EmotiBit data type (Hz).
+            # These come from the EmotiBit firmware spec — BrainFlow's
+            # "preset sampling_rate" is sometimes wrong (it reports the
+            # fastest rate in the preset, not the actual per-channel rate).
+            self._fs_default = 25.0   # IMU (acc/gyro/mag): 25 Hz native
+            self._fs_aux     = 25.0   # PPG (IR/Red/Green): 25 Hz native
+            self._fs_anc     = 15.0   # EDA: 15 Hz, Temp: 7.5 Hz upsampled to 15 by BrainFlow
+
+            # Per-preset state for monotonic-timestamp synthesis: anchors
+            # the first sample's host clock and advances by package-number
+            # delta thereafter, so per-sample timestamps reflect the true
+            # native rate instead of the host receive jitter.
+            self._anchor = {0: None, 1: None, 2: None}
+            # Per-preset gap counter for diagnostics
+            self._gaps = {0: 0, 1: 0, 2: 0}
+
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -2147,26 +2250,35 @@ class EmotiBitThread(threading.Thread):
                 self._drain_and_push(
                     preset=0,
                     ts_row=int(self._ts_default),
+                    pkg_row=self._pkg_default,
                     indices=list(self._imu_idx),
                     outlet=self.out_imu,
                     label="IMU",
+                    native_fs=self._fs_default,
                 )
                 self._drain_and_push(
                     preset=1,
                     ts_row=int(self._ts_aux),
+                    pkg_row=self._pkg_aux,
                     indices=list(self._ppg_idx),
                     outlet=self.out_ppg,
                     label="PPG",
+                    native_fs=self._fs_aux,
                     filters=self._ppg_filters,
                 )
                 if self._eda_idx and self._temp_idx:
                     indices = [int(self._eda_idx[0]), int(self._temp_idx[0])]
+                    # The temperature channel (index 1 in our list) is
+                    # 2x sample-and-hold by BrainFlow → smooth it.
                     self._drain_and_push(
                         preset=2,
                         ts_row=int(self._ts_anc),
+                        pkg_row=self._pkg_anc,
                         indices=indices,
                         outlet=self.out_eda_temp,
                         label="EDA_TEMP",
+                        native_fs=self._fs_anc,
+                        post_smooth_indices=[1],
                     )
                 # Battery: poll latest value
                 self._poll_battery()
@@ -2186,7 +2298,10 @@ class EmotiBitThread(threading.Thread):
                 age = now - self.last_data_at
 
                 if (now - self.last_heartbeat_at) >= STATUS_HEARTBEAT_S:
-                    log("[EmotiBit]", f"Data flowing (last sample {age*1000:.0f} ms ago).")
+                    g = self._gaps
+                    log("[EmotiBit]",
+                        f"Data flowing (last {age*1000:.0f} ms ago). "
+                        f"Gaps cumulative — IMU:{g.get(0,0)} PPG:{g.get(1,0)} EDA:{g.get(2,0)}")
                     self.last_heartbeat_at = now
 
                 if age >= NO_DATA_WARN_S and (now - self.last_warn_at) >= NO_DATA_REPEAT_S:
@@ -2631,11 +2746,15 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
             from PyQt5 import QtGui as Qg, QtCore as Qc2
             p = Qg.QPainter(self)
             p.setRenderHint(Qg.QPainter.Antialiasing, True)
-            p.setBrush(Qg.QColor("#e8ecf0" if self.isEnabled() else "#2a3340"))
-            p.setPen(Qc2.Qt.NoPen)
             opt = Qw.QStyleOptionSpinBox(); self.initStyleOption(opt)
             up = self.style().subControlRect(Qw.QStyle.CC_SpinBox, opt, Qw.QStyle.SC_SpinBoxUp, self)
             dn = self.style().subControlRect(Qw.QStyle.CC_SpinBox, opt, Qw.QStyle.SC_SpinBoxDown, self)
+            # Cover the default arrow squares first
+            p.setPen(Qc2.Qt.NoPen)
+            p.setBrush(Qg.QColor("#1e252e"))
+            p.drawRect(up); p.drawRect(dn)
+            # Then paint our triangles
+            p.setBrush(Qg.QColor("#e8ecf0" if self.isEnabled() else "#2a3340"))
             s = 5
             p.drawPolygon(Qg.QPolygon([
                 Qc2.QPoint(up.center().x() - s, up.center().y() + s // 2 + 1),

@@ -236,77 +236,61 @@ class Reader(threading.Thread):
 
 # ── Y-scale widget ───────────────────────────────────────────────────────────
 
-class ArrowSpinBox(QtWidgets.QDoubleSpinBox):
-    """QDoubleSpinBox that paints its own arrow triangles on top of the
-    up/down buttons, bypassing style-sheet conflicts with the native style."""
+def _paint_spinbox_arrows(spin: QtWidgets.QAbstractSpinBox,
+                           bg_color: str, fg_color: str, fg_dim: str, size: int = 4):
+    """Paint custom up/down triangle arrows on a spinbox, covering any
+    default Qt arrow that may bleed through the stylesheet (squares, dots,
+    etc).  Call this from a paintEvent() override AFTER super().paintEvent()."""
+    painter = QtGui.QPainter(spin)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    opt = QtWidgets.QStyleOptionSpinBox()
+    spin.initStyleOption(opt)
+    style = spin.style()
+    up_rect = style.subControlRect(
+        QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxUp, spin)
+    dn_rect = style.subControlRect(
+        QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxDown, spin)
 
+    # 1. Cover both button areas with the BG color so any default Qt
+    #    arrow (squares/dots) is hidden.
+    painter.setPen(QtCore.Qt.NoPen)
+    painter.setBrush(QtGui.QColor(bg_color))
+    painter.drawRect(up_rect)
+    painter.drawRect(dn_rect)
+
+    # 2. Draw clean triangles on top.
+    color = QtGui.QColor(fg_color if spin.isEnabled() else fg_dim)
+    painter.setBrush(color)
+    s = size
+    cx_u, cy_u = up_rect.center().x(), up_rect.center().y()
+    cx_d, cy_d = dn_rect.center().x(), dn_rect.center().y()
+    tri_up = QtGui.QPolygon([
+        QtCore.QPoint(cx_u - s, cy_u + s // 2 + 1),
+        QtCore.QPoint(cx_u + s, cy_u + s // 2 + 1),
+        QtCore.QPoint(cx_u,     cy_u - s + 1),
+    ])
+    tri_dn = QtGui.QPolygon([
+        QtCore.QPoint(cx_d - s, cy_d - s // 2),
+        QtCore.QPoint(cx_d + s, cy_d - s // 2),
+        QtCore.QPoint(cx_d,     cy_d + s),
+    ])
+    painter.drawPolygon(tri_up)
+    painter.drawPolygon(tri_dn)
+    painter.end()
+
+
+class ArrowSpinBox(QtWidgets.QDoubleSpinBox):
+    """QDoubleSpinBox with cleanly painted triangle arrows."""
     def paintEvent(self, ev):
         super().paintEvent(ev)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        enabled = self.isEnabled()
-        color = QtGui.QColor(TEXT_PRIMARY if enabled else BORDER)
-        painter.setBrush(color)
-        painter.setPen(QtCore.Qt.NoPen)
-
-        opt = QtWidgets.QStyleOptionSpinBox()
-        self.initStyleOption(opt)
-        up_rect = self.style().subControlRect(
-            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxUp, self)
-        dn_rect = self.style().subControlRect(
-            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxDown, self)
-
-        # Up arrow: triangle pointing up, centered in up_rect
-        cx_u = up_rect.center().x()
-        cy_u = up_rect.center().y()
-        s = 3
-        tri_up = QtGui.QPolygon([
-            QtCore.QPoint(cx_u - s, cy_u + s // 2 + 1),
-            QtCore.QPoint(cx_u + s, cy_u + s // 2 + 1),
-            QtCore.QPoint(cx_u, cy_u - s + 1),
-        ])
-        painter.drawPolygon(tri_up)
-
-        # Down arrow
-        cx_d = dn_rect.center().x()
-        cy_d = dn_rect.center().y()
-        tri_dn = QtGui.QPolygon([
-            QtCore.QPoint(cx_d - s, cy_d - s // 2),
-            QtCore.QPoint(cx_d + s, cy_d - s // 2),
-            QtCore.QPoint(cx_d, cy_d + s),
-        ])
-        painter.drawPolygon(tri_dn)
-        painter.end()
+        _paint_spinbox_arrows(self, BG_CARD, TEXT_PRIMARY, BORDER, size=3)
 
 
 class ArrowIntSpinBox(QtWidgets.QSpinBox):
     """Integer version of ArrowSpinBox for the participant count dialog."""
     def paintEvent(self, ev):
         super().paintEvent(ev)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        color = QtGui.QColor("#e8ecf0" if self.isEnabled() else "#2a3340")
-        painter.setBrush(color); painter.setPen(QtCore.Qt.NoPen)
-        opt = QtWidgets.QStyleOptionSpinBox()
-        self.initStyleOption(opt)
-        up_rect = self.style().subControlRect(
-            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxUp, self)
-        dn_rect = self.style().subControlRect(
-            QtWidgets.QStyle.CC_SpinBox, opt, QtWidgets.QStyle.SC_SpinBoxDown, self)
-        s = 4
-        tri_up = QtGui.QPolygon([
-            QtCore.QPoint(up_rect.center().x() - s, up_rect.center().y() + s // 2 + 1),
-            QtCore.QPoint(up_rect.center().x() + s, up_rect.center().y() + s // 2 + 1),
-            QtCore.QPoint(up_rect.center().x(), up_rect.center().y() - s + 1),
-        ])
-        tri_dn = QtGui.QPolygon([
-            QtCore.QPoint(dn_rect.center().x() - s, dn_rect.center().y() - s // 2),
-            QtCore.QPoint(dn_rect.center().x() + s, dn_rect.center().y() - s // 2),
-            QtCore.QPoint(dn_rect.center().x(), dn_rect.center().y() + s),
-        ])
-        painter.drawPolygon(tri_up)
-        painter.drawPolygon(tri_dn)
-        painter.end()
+        _paint_spinbox_arrows(self, BG_CARD, "#e8ecf0", "#2a3340", size=4)
 
 
 class YScaleWidget(QtWidgets.QWidget):
@@ -1395,6 +1379,16 @@ class Viewer(QtWidgets.QMainWindow):
             # Battery streams: not shown as channels, just read the value
             if st.stype == "Battery" or st.name.endswith("_Battery"):
                 self._start_battery_reader(key, st)
+                continue
+
+            # Clock/sync streams: useful in recordings but cluttering the
+            # live view (mostly flat diagnostic values). Skip the UI
+            # entirely — the LSL stream stays available for LabRecorder.
+            if st.stype == "CLOCK" or st.name.startswith("Clock_"):
+                try:
+                    st.inlet.close_stream()
+                except Exception:
+                    pass
                 continue
 
             self.streams[key] = st
