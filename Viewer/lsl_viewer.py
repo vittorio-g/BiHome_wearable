@@ -49,12 +49,30 @@ BEAT_SHIFT_S = 0.40       # beat detection delay (POST_S) — shift beat channel
 
 # LabRecorder paths (relative to this file's directory)
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# Writable dir for settings/recordings: next to the .exe when frozen,
-# next to the script otherwise
-if getattr(sys, "frozen", False):
-    _WRITABLE_DIR = os.path.dirname(sys.executable)
-else:
-    _WRITABLE_DIR = os.path.dirname(_HERE)  # project root
+
+
+def _resolve_app_data_dir() -> str:
+    """Per-user writable directory. Same logic as BiHome_wearable.py
+    so settings, recordings, and the device registry live in one place
+    that survives upgrades and works even when the .exe is installed
+    in Program Files (read-only)."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = (os.environ.get("XDG_DATA_HOME")
+                or os.path.expanduser("~/.local/share"))
+    d = os.path.join(base, "BiHome")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        d = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+             else os.path.dirname(_HERE))
+    return d
+
+
+_WRITABLE_DIR = _resolve_app_data_dir()
 _FONT_DIR = os.path.join(_HERE, "fonts")
 _REC_DIR = os.path.join(os.path.dirname(_HERE), "LabRecorder")
 LABRECORDER_CLI = os.path.join(_REC_DIR, "LabRecorderCLI.exe")

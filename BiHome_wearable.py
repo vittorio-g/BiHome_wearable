@@ -27,6 +27,63 @@ if getattr(sys, "frozen", False):
     _ROOT_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
 else:
     _ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_app_data_dir() -> str:
+    """Return a per-user writable directory for state files, recordings,
+    logs, and the device registry. Survives across upgrades and works
+    even when the .exe is installed in Program Files (read-only)."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = (os.environ.get("XDG_DATA_HOME")
+                or os.path.expanduser("~/.local/share"))
+    d = os.path.join(base, "BiHome")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        # Fallback to script/exe dir if we somehow can't write APPDATA
+        d = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
+    return d
+
+
+_WRITABLE_DIR = _resolve_app_data_dir()
+
+
+def _migrate_legacy_state():
+    """One-time migration of state files from the script/exe dir to the new
+    per-user writable dir. Silently skips files that don't exist or are
+    already migrated."""
+    legacy_root = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+                   else os.path.dirname(os.path.abspath(__file__)))
+    if legacy_root == _WRITABLE_DIR:
+        return  # already there
+    import shutil as _sh
+    for fn in ("wizard_defaults.json", "viewer_settings.json",
+               "active_participants.json", "devices.json"):
+        old = os.path.join(legacy_root, fn)
+        new = os.path.join(_WRITABLE_DIR, fn)
+        if os.path.isfile(old) and not os.path.isfile(new):
+            try:
+                _sh.move(old, new)
+                print(f"[Migration] moved {fn} → {_WRITABLE_DIR}")
+            except Exception:
+                pass
+    # Also check Viewer/ subdir for legacy viewer_settings.json
+    legacy_viewer = os.path.join(legacy_root, "Viewer", "viewer_settings.json")
+    new_viewer = os.path.join(_WRITABLE_DIR, "viewer_settings.json")
+    if os.path.isfile(legacy_viewer) and not os.path.isfile(new_viewer):
+        try:
+            _sh.move(legacy_viewer, new_viewer)
+            print(f"[Migration] moved Viewer/viewer_settings.json → {_WRITABLE_DIR}")
+        except Exception:
+            pass
+
+
+_migrate_legacy_state()
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -75,20 +132,63 @@ POLAR_LABEL_MAP = {
 }
 
 # =====================================================
-# Known devices registry — friendly name → address/serial
+# Known devices registry — friendly name → (address/serial, label)
 # =====================================================
+# The registry is loaded from `devices.json` in the per-user app dir on
+# startup, then saved back when the user adds devices via the wizard UI.
+# Seed defaults below are used the FIRST time the app runs on a machine
+# (or if devices.json is missing/corrupted) so legacy behaviour is
+# preserved. End-users add their own devices via the wizard, no source
+# editing required.
 
-# Short friendly name → (address/serial, long description)
-# Short names are used in LSL stream names and in the viewer UI.
-KNOWN_POLAR = {
+_DEFAULT_KNOWN_POLAR = {
     "Polar 1":    ("24:AC:AC:04:96:A3", "0496A33F"),
     "Polar 2":    ("24:AC:AC:04:93:ED", "0493ED32"),
 }
 
-KNOWN_EMOTIBIT = {
+_DEFAULT_KNOWN_EMOTIBIT = {
     "EmotiBit 1": ("MD-V6-0000482", ""),
     "EmotiBit 2": ("MD-V6-0000089", ""),
 }
+
+_DEVICES_JSON_PATH = os.path.join(_WRITABLE_DIR, "devices.json")
+_DEVICES_SCHEMA_VERSION = 1
+
+
+def _load_devices_registry() -> Tuple[Dict[str, Tuple], Dict[str, Tuple]]:
+    """Load (polar_dict, emotibit_dict) from devices.json. Fall back to
+    seed defaults if the file is missing, unreadable, or schema mismatch."""
+    try:
+        import json as _json
+        with open(_DEVICES_JSON_PATH, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if data.get("_schema_version") != _DEVICES_SCHEMA_VERSION:
+            return dict(_DEFAULT_KNOWN_POLAR), dict(_DEFAULT_KNOWN_EMOTIBIT)
+        polar = {k: tuple(v) for k, v in data.get("polar", {}).items()}
+        emo   = {k: tuple(v) for k, v in data.get("emotibit", {}).items()}
+        return polar, emo
+    except Exception:
+        return dict(_DEFAULT_KNOWN_POLAR), dict(_DEFAULT_KNOWN_EMOTIBIT)
+
+
+def _save_devices_registry(polar: Dict[str, Tuple],
+                           emotibit: Dict[str, Tuple]) -> None:
+    """Persist the registry to devices.json. Called whenever the wizard
+    UI adds, edits, or removes a device."""
+    try:
+        import json as _json
+        data = {
+            "_schema_version": _DEVICES_SCHEMA_VERSION,
+            "polar":    {k: list(v) for k, v in polar.items()},
+            "emotibit": {k: list(v) for k, v in emotibit.items()},
+        }
+        with open(_DEVICES_JSON_PATH, "w", encoding="utf-8") as f:
+            _json.dump(data, f, indent=2)
+    except Exception as e:
+        log("[Devices]", f"could not save devices.json: {e}")
+
+
+KNOWN_POLAR, KNOWN_EMOTIBIT = _load_devices_registry()
 
 # =====================================================
 # Multi-participant helpers
@@ -162,8 +262,42 @@ STATUS_HEARTBEAT_S = 5.0
 NO_DATA_WARN_S = 5.0
 NO_DATA_REPEAT_S = 10.0
 
+# Rotating file logger in the per-user app dir. Necessary for --windowed
+# .exe builds where stdout is silenced — without this we'd lose all
+# diagnostics. The file is opened lazily on first log() call and grows
+# without rotation (small footprint; user can delete when needed).
+_LOG_FILE_PATH = os.path.join(_WRITABLE_DIR, "acquisition.log")
+_LOG_FILE_HANDLE = None
+_LOG_LOCK = threading.Lock() if False else None  # set lazily
+
+def _get_log_handle():
+    global _LOG_FILE_HANDLE, _LOG_LOCK
+    if _LOG_FILE_HANDLE is None:
+        try:
+            import threading as _t
+            _LOG_LOCK = _t.Lock()
+            # Truncate at start of a new session so logs don't grow forever
+            _LOG_FILE_HANDLE = open(_LOG_FILE_PATH, "w", encoding="utf-8",
+                                     buffering=1)  # line-buffered
+            _LOG_FILE_HANDLE.write(
+                f"=== BiHome session started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        except Exception:
+            _LOG_FILE_HANDLE = False  # sentinel: don't try again
+    return _LOG_FILE_HANDLE
+
+
 def log(tag: str, msg: str) -> None:
-    print(f"{time.strftime('%H:%M:%S')} {tag} {msg}", flush=True)
+    line = f"{time.strftime('%H:%M:%S')} {tag} {msg}"
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass  # stdout may be None in --windowed exe
+    fh = _get_log_handle()
+    if fh:
+        try:
+            fh.write(line + "\n")
+        except Exception:
+            pass
 
 # =====================================================
 # Global stop
@@ -3013,6 +3147,103 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
         return result
 
 # (continuation of run_setup_wizard; the inline build code is moved below)
+def _add_device_dialog(parent=None) -> bool:
+    """Dialog to register a new Polar or EmotiBit device in devices.json.
+    Returns True if a device was added (caller should rescan)."""
+    from PyQt5 import QtWidgets as Qw, QtCore as Qc
+    ACCENT = "#05abc4"; BORDER = "#2a3340"; TEXT = "#e8ecf0"; GRAY = "#657179"
+    BG_IN = "#252d38"
+
+    d = Qw.QDialog(parent)
+    d.setWindowTitle("BiHome — Add device")
+    d.setFixedSize(440, 290)
+    lay = Qw.QVBoxLayout(d); lay.setContentsMargins(20, 20, 20, 16); lay.setSpacing(10)
+
+    title = Qw.QLabel("Add a new device")
+    title.setStyleSheet(f"color: {ACCENT}; font-size: 14px; font-weight: bold;")
+    lay.addWidget(title)
+
+    # Device type
+    type_row = Qw.QHBoxLayout()
+    type_row.addWidget(Qw.QLabel("Type:"))
+    type_combo = Qw.QComboBox()
+    type_combo.addItems(["Polar H10 (BLE MAC)", "EmotiBit (WiFi serial)"])
+    type_combo.setStyleSheet(
+        f"QComboBox {{ background: {BG_IN}; color: {TEXT}; "
+        f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
+    type_row.addWidget(type_combo, stretch=1)
+    lay.addLayout(type_row)
+
+    # Friendly name
+    lay.addWidget(Qw.QLabel("Friendly name (e.g. 'Polar 3'):"))
+    name_edit = Qw.QLineEdit()
+    name_edit.setPlaceholderText("Shown in the dropdown and stream names")
+    name_edit.setStyleSheet(
+        f"QLineEdit {{ background: {BG_IN}; color: {TEXT}; "
+        f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
+    lay.addWidget(name_edit)
+
+    # Address / serial
+    addr_lbl = Qw.QLabel("MAC address (XX:XX:XX:XX:XX:XX):")
+    lay.addWidget(addr_lbl)
+    addr_edit = Qw.QLineEdit()
+    addr_edit.setPlaceholderText("24:AC:AC:04:96:A3")
+    addr_edit.setStyleSheet(
+        f"QLineEdit {{ background: {BG_IN}; color: {TEXT}; "
+        f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
+    lay.addWidget(addr_edit)
+
+    def _on_type_change():
+        if type_combo.currentIndex() == 0:
+            addr_lbl.setText("MAC address (XX:XX:XX:XX:XX:XX):")
+            addr_edit.setPlaceholderText("24:AC:AC:04:96:A3")
+        else:
+            addr_lbl.setText("EmotiBit serial number (MD-V6-XXXXXXX):")
+            addr_edit.setPlaceholderText("MD-V6-0000482")
+    type_combo.currentIndexChanged.connect(_on_type_change)
+
+    # Buttons
+    btns = Qw.QHBoxLayout(); btns.addStretch()
+    cancel = Qw.QPushButton("Cancel"); cancel.clicked.connect(d.reject)
+    cancel.setAutoDefault(False); cancel.setDefault(False)
+    save = Qw.QPushButton("Save")
+    save.setAutoDefault(True); save.setDefault(True)
+    save.setStyleSheet(
+        f"QPushButton {{ background: {ACCENT}; color: white; border: none; "
+        f"border-radius: 4px; padding: 6px 18px; font-weight: bold; }}")
+
+    _added = [False]
+    def _on_save():
+        global KNOWN_POLAR, KNOWN_EMOTIBIT
+        name = name_edit.text().strip()
+        addr = addr_edit.text().strip()
+        if not name or not addr:
+            Qw.QMessageBox.warning(d, "Missing field",
+                "Both friendly name and address/serial are required.")
+            return
+        if type_combo.currentIndex() == 0:
+            # Polar — basic MAC validation
+            import re as _re
+            mac = addr.upper().replace("-", ":")
+            if not _re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", mac):
+                Qw.QMessageBox.warning(d, "Invalid MAC",
+                    "MAC must look like XX:XX:XX:XX:XX:XX (hex pairs).")
+                return
+            KNOWN_POLAR[name] = (mac, "")
+        else:
+            KNOWN_EMOTIBIT[name] = (addr, "")
+        _save_devices_registry(KNOWN_POLAR, KNOWN_EMOTIBIT)
+        _added[0] = True
+        d.accept()
+    save.clicked.connect(_on_save)
+    btns.addWidget(cancel); btns.addWidget(save)
+    lay.addLayout(btns)
+    name_edit.setFocus()
+
+    d.exec_()
+    return _added[0]
+
+
 def _build_assignment_dialog(n_participants, polar_online, emo_online,
                               btn_style, ACCENT, BG_CARD, BORDER, GRAY, TEXT):
     """Return list of ParticipantConfig, or 'rescan', or None (cancel)."""
@@ -3189,13 +3420,30 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
 
     l2.addLayout(grid)
 
+    # Row of secondary actions: "Add device" + connect
+    actions_row = Qw.QHBoxLayout()
+    add_dev_btn = Qw.QPushButton("+ Add device…")
+    add_dev_btn.setStyleSheet(
+        f"QPushButton {{ background: transparent; color: {GRAY}; "
+        f"border: 1px solid {BORDER}; border-radius: 4px; "
+        f"padding: 6px 14px; font-size: 11px; }} "
+        f"QPushButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}")
+    def _on_add_device():
+        if _add_device_dialog(d2):
+            _action["value"] = "rescan"
+            d2.accept()
+    add_dev_btn.clicked.connect(_on_add_device)
+    actions_row.addWidget(add_dev_btn)
+    actions_row.addStretch()
+
     ok2 = Qw.QPushButton("Connect")
     ok2.setStyleSheet(btn_style)
     def _on_connect():
         _action["value"] = "connect"
         d2.accept()
     ok2.clicked.connect(_on_connect)
-    l2.addWidget(ok2)
+    actions_row.addWidget(ok2)
+    l2.addLayout(actions_row)
 
     d2.exec_()
     if _action["value"] == "rescan":
@@ -3242,9 +3490,7 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
     return configs
 
 
-# Wizard defaults persistence — stored next to the exe/script (writable path)
-_WRITABLE_DIR = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
-                 else os.path.dirname(os.path.abspath(__file__)))
+# Wizard defaults — stored in the per-user writable dir (set near top of file)
 _WIZARD_DEFAULTS_FILE = os.path.join(_WRITABLE_DIR, "wizard_defaults.json")
 
 def _load_wizard_defaults() -> dict:
@@ -3585,13 +3831,20 @@ def main():
     # (sys.executable points to the BiHome Wearable.exe, not Python).
     viewer_proc = None
     viewer_in_process = False
+    viewer_path = os.path.join(_ROOT_DIR, "Viewer", "lsl_viewer.py")
     if getattr(sys, "frozen", False):
         viewer_in_process = True
     else:
-        viewer_path = os.path.join(_ROOT_DIR, "Viewer", "lsl_viewer.py")
-        if os.path.isfile(viewer_path):
+        if not os.path.isfile(viewer_path):
+            log("[Main]", f"ERROR: viewer script not found at {viewer_path}")
+            print(f"ERROR: viewer script not found at {viewer_path}", file=sys.stderr)
+        else:
             log("[Main]", f"Launching viewer: {viewer_path}")
-            viewer_proc = subprocess.Popen([sys.executable, viewer_path])
+            try:
+                viewer_proc = subprocess.Popen([sys.executable, viewer_path])
+            except Exception as e:
+                log("[Main]", f"ERROR: could not launch viewer subprocess: {e}")
+                viewer_proc = None
 
     # ── Monitor (replaces old main loop) ──
     monitor_devices = [MonitoredDevice(health=h, thread=None) for h in all_healths.values()]
@@ -3635,8 +3888,31 @@ def main():
             # Qt needs the main thread, and _setup_qt_app() already created
             # a QApplication during the wizard — reuse it.
             sys.path.insert(0, os.path.join(_ROOT_DIR, "Viewer"))
-            import lsl_viewer as _viewer
-            _viewer.main()  # blocks until viewer window closed
+            try:
+                import lsl_viewer as _viewer
+            except Exception as e:
+                log("[Main]", f"FATAL: cannot import viewer module: {e}")
+                # Show a user-facing error dialog if Qt is available
+                try:
+                    from PyQt5 import QtWidgets as Qw
+                    app = Qw.QApplication.instance() or Qw.QApplication(sys.argv)
+                    Qw.QMessageBox.critical(
+                        None, "BiHome Wearable",
+                        f"The viewer module failed to load.\n\n{type(e).__name__}: {e}\n\n"
+                        f"Acquisition is still running but no live plots will be shown.\n"
+                        f"Check the log at:\n{_LOG_FILE_PATH}")
+                except Exception:
+                    pass
+                # Fall through to keep acquisition alive until user kills it
+                while not stop_event.is_set():
+                    time.sleep(0.5)
+            else:
+                try:
+                    _viewer.main()  # blocks until viewer window closed
+                except SystemExit:
+                    pass  # viewer's sys.exit() — expected on close
+                except Exception as e:
+                    log("[Main]", f"viewer crashed: {e}")
         else:
             while True:
                 if viewer_proc is not None:
