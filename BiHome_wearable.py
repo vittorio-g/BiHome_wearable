@@ -3331,9 +3331,17 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
 
     # ── Loop: scan + assignment dialog. User can request rescan from inside ──
     while True:
-        discovered = run_device_scan_dialog()
-        polar_online = discovered.get("polar", set())
-        emo_online = discovered.get("emotibit", set())
+        # First-launch optimisation: when the registry is empty there is
+        # nothing the scan can find, and the user just sees "0 found" which
+        # is confusing. Skip the scan entirely and let the assignment
+        # dialog's "+ Add device…" nudge take over.
+        if not KNOWN_POLAR and not KNOWN_EMOTIBIT:
+            polar_online: set = set()
+            emo_online:   set = set()
+        else:
+            discovered = run_device_scan_dialog()
+            polar_online = discovered.get("polar", set())
+            emo_online = discovered.get("emotibit", set())
         # Build dialog 2 (block of code below). On rescan: continue loop.
         # On accept: break with results. On cancel: return None.
         result = _build_assignment_dialog(
@@ -3350,6 +3358,149 @@ def run_setup_wizard() -> Optional[List[ParticipantConfig]]:
         return result
 
 # (continuation of run_setup_wizard; the inline build code is moved below)
+def _pick_ble_device_dialog(parent=None):
+    """Show a modal dialog that lists ALL nearby BLE devices (not just
+    known ones). Returns (friendly_name, mac_address) or None if the
+    user cancelled. Used by the Add Device dialog so end-users don't
+    need to dig MAC addresses out of Windows Settings."""
+    from PyQt5 import QtWidgets as Qw, QtCore as Qc
+    ACCENT = "#05abc4"; BORDER = "#2a3340"; TEXT = "#e8ecf0"; GRAY = "#657179"
+
+    d = Qw.QDialog(parent)
+    d.setWindowTitle("BiHome — Scan nearby BLE")
+    d.setFixedSize(520, 420)
+    lay = Qw.QVBoxLayout(d); lay.setContentsMargins(20, 20, 20, 16); lay.setSpacing(10)
+
+    title = Qw.QLabel("Nearby Bluetooth devices")
+    title.setStyleSheet(f"color: {ACCENT}; font-size: 14px; font-weight: bold;")
+    lay.addWidget(title)
+
+    hint = Qw.QLabel(
+        "Scanning… look for a row labelled <b>Polar H10</b> (or similar) "
+        "and click it to copy its MAC. Make sure the device is on (LED blinking).")
+    hint.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+    hint.setWordWrap(True)
+    lay.addWidget(hint)
+
+    progress = Qw.QProgressBar()
+    progress.setRange(0, 0); progress.setStyleSheet(
+        f"QProgressBar {{ border: 1px solid {BORDER}; border-radius: 4px; "
+        f"background: #252d38; height: 6px; }} "
+        f"QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}")
+    lay.addWidget(progress)
+
+    # List of discovered devices
+    listw = Qw.QListWidget()
+    listw.setStyleSheet(
+        f"QListWidget {{ background: #171d24; color: {TEXT}; "
+        f"border: 1px solid {BORDER}; border-radius: 6px; font-size: 11px; "
+        f"font-family: 'Consolas', monospace; }} "
+        f"QListWidget::item {{ padding: 4px 8px; }} "
+        f"QListWidget::item:hover {{ background: rgba(5,171,196,0.12); }} "
+        f"QListWidget::item:selected {{ background: {ACCENT}; color: white; }}")
+    lay.addWidget(listw, stretch=1)
+
+    btns = Qw.QHBoxLayout(); btns.addStretch()
+    cancel = Qw.QPushButton("Cancel"); cancel.clicked.connect(d.reject)
+    cancel.setAutoDefault(False); cancel.setDefault(False)
+    use = Qw.QPushButton("Use selected")
+    use.setEnabled(False)
+    use.setAutoDefault(True); use.setDefault(True)
+    use.setStyleSheet(
+        f"QPushButton {{ background: {ACCENT}; color: white; border: none; "
+        f"border-radius: 4px; padding: 6px 18px; font-weight: bold; }} "
+        f"QPushButton:disabled {{ background: {BORDER}; color: {GRAY}; }}")
+    use.clicked.connect(d.accept)
+    btns.addWidget(cancel); btns.addWidget(use)
+    lay.addLayout(btns)
+
+    # Background scan thread populates this dict; the UI poller drains it.
+    results = {"devices": [], "done": False, "error": ""}
+
+    def _scan_thread():
+        try:
+            import asyncio as _aio
+            from bleak import BleakScanner
+            if sys.platform == "win32":
+                try:
+                    _aio.set_event_loop_policy(_aio.WindowsProactorEventLoopPolicy())
+                except Exception:
+                    pass
+            async def _do():
+                devs = await BleakScanner.discover(timeout=6.0)
+                # Return [(name, mac)], unsorted (UI sorts known-name-first)
+                return [(getattr(d, 'name', None) or '(unnamed)',
+                         (d.address or '').upper()) for d in devs if d.address]
+            loop = _aio.new_event_loop()
+            _aio.set_event_loop(loop)
+            try:
+                results["devices"] = loop.run_until_complete(_do())
+            finally:
+                loop.close()
+        except Exception as e:
+            results["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            results["done"] = True
+
+    threading.Thread(target=_scan_thread, daemon=True).start()
+
+    def _on_list_change():
+        use.setEnabled(listw.currentItem() is not None)
+    listw.itemSelectionChanged.connect(_on_list_change)
+    listw.itemDoubleClicked.connect(lambda _: d.accept())
+
+    def _poll():
+        if not results["done"]:
+            return
+        timer.stop()
+        progress.setRange(0, 1); progress.setValue(1)
+        if results["error"]:
+            err = Qw.QListWidgetItem(f"ERROR: {results['error']}")
+            listw.addItem(err)
+            hint.setText("BLE scan failed — see the error above. "
+                         "Common causes: Bluetooth radio is off, no BT adapter, "
+                         "drivers missing.")
+            return
+        devs = results["devices"]
+        # Sort: rows whose name starts with "Polar" first, then named, then unnamed
+        def _key(d):
+            n = (d[0] or "").lower()
+            if n.startswith("polar"): return (0, n)
+            if n != "(unnamed)":      return (1, n)
+            return (2, n)
+        devs.sort(key=_key)
+        for nm, mac in devs:
+            label = f"{nm:32.32s}  {mac}"
+            listw.addItem(label)
+        if not devs:
+            listw.addItem("(no BLE devices in range — power on your Polar and retry)")
+            return
+        hint.setText(f"Found {len(devs)} device(s). Click the one that looks "
+                     f"like your Polar (usually <b>Polar H10 XXXXXX</b>) and "
+                     f"then <b>Use selected</b>.")
+
+    timer = Qc.QTimer(); timer.timeout.connect(_poll); timer.start(200)
+
+    if d.exec_() != Qw.QDialog.Accepted:
+        return None
+    item = listw.currentItem()
+    if item is None:
+        return None
+    txt = item.text()
+    # Parse "name padded  MAC". MAC is the last 17 characters (XX:XX:XX:XX:XX:XX)
+    import re as _re
+    m = _re.search(r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})\s*$", txt)
+    if not m:
+        return None
+    mac = m.group(1)
+    # Friendly name candidate: trim whitespace before MAC
+    name = txt[:m.start()].strip() or "Polar 1"
+    # Cleanup: if name is "(unnamed)" or empty, fall back to a generic
+    if name in ("(unnamed)", ""):
+        name = "Polar 1"
+    return (name, mac)
+
+
 def _add_device_dialog(parent=None) -> bool:
     """Dialog to register a new Polar or EmotiBit device in devices.json.
     Returns True if a device was added (caller should rescan)."""
@@ -3396,14 +3547,40 @@ def _add_device_dialog(parent=None) -> bool:
         f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
     lay.addWidget(addr_edit)
 
+    # "Scan nearby BLE" — only meaningful for Polar (type index 0).
+    # Lists every BLE device around, the user clicks the row that looks
+    # like their Polar and the MAC is auto-filled. No more hunting in
+    # Windows Bluetooth settings.
+    scan_btn = Qw.QPushButton("🔍  Scan nearby BLE")
+    scan_btn.setStyleSheet(
+        f"QPushButton {{ background: transparent; color: {ACCENT}; "
+        f"border: 1px solid {ACCENT}; border-radius: 4px; "
+        f"padding: 5px 10px; font-size: 11px; }} "
+        f"QPushButton:hover {{ background: rgba(5,171,196,0.12); }} "
+        f"QPushButton:disabled {{ color: {GRAY}; border-color: {BORDER}; }}")
+    def _on_scan_ble():
+        picked = _pick_ble_device_dialog(d)
+        if picked:
+            picked_name, picked_addr = picked
+            if not name_edit.text().strip() and picked_name:
+                name_edit.setText(picked_name)
+            addr_edit.setText(picked_addr)
+    scan_btn.clicked.connect(_on_scan_ble)
+    lay.addWidget(scan_btn)
+
     def _on_type_change():
         if type_combo.currentIndex() == 0:
             addr_lbl.setText("MAC address (XX:XX:XX:XX:XX:XX):")
             addr_edit.setPlaceholderText("24:AC:AC:04:96:A3")
+            scan_btn.setEnabled(True)
+            scan_btn.setToolTip("Discover nearby Bluetooth devices and pick yours")
         else:
             addr_lbl.setText("EmotiBit serial number (MD-V6-XXXXXXX):")
             addr_edit.setPlaceholderText("MD-V6-0000482")
+            scan_btn.setEnabled(False)
+            scan_btn.setToolTip("EmotiBit uses WiFi — read the serial from the device label")
     type_combo.currentIndexChanged.connect(_on_type_change)
+    _on_type_change()  # initialise tooltip / enabled state
 
     # Buttons
     btns = Qw.QHBoxLayout(); btns.addStretch()
@@ -3434,7 +3611,15 @@ def _add_device_dialog(parent=None) -> bool:
                 return
             KNOWN_POLAR[name] = (mac, "")
         else:
-            KNOWN_EMOTIBIT[name] = (addr, "")
+            # EmotiBit — format is MD-V<digit>-<7 digits>, e.g. MD-V6-0000482
+            import re as _re
+            sn = addr.strip().upper()
+            if not _re.fullmatch(r"MD-V\d+-\d{4,}", sn):
+                Qw.QMessageBox.warning(d, "Invalid serial",
+                    "EmotiBit serial should look like MD-V6-0000482 "
+                    "(printed on the device PCB or back).")
+                return
+            KNOWN_EMOTIBIT[name] = (sn, "")
         _save_devices_registry(KNOWN_POLAR, KNOWN_EMOTIBIT)
         _added[0] = True
         d.accept()

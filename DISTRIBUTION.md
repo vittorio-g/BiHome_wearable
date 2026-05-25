@@ -73,6 +73,58 @@ other apps, so try launching BiHome first.
 
 ---
 
+## Finding your device addresses
+
+You need to know the **MAC address** of each Polar H10 and the
+**serial number** of each EmotiBit before you can register them in the
+"+ Add device…" dialog.
+
+### Polar H10 — Bluetooth MAC address
+
+The MAC is a 6-pair hex string like `24:AC:AC:04:96:A3`. Two easy ways
+to find it:
+
+**Option A — use the in-app BLE scanner (recommended):**
+1. Make sure your Polar H10 is **powered on** (LED blinking blue).
+2. In the wizard, click **`+ Add device…`** → select **"Polar H10"**.
+3. Click **"🔍 Scan nearby BLE"** in that dialog.
+4. After ~6 s a list of nearby BLE devices appears.
+5. Find the line starting with **"Polar"** and click it — the MAC fills
+   in automatically.
+6. Type a friendly name (e.g. *"Polar 1"*) and click Save.
+
+**Option B — via Windows Settings:**
+1. Open Windows **Settings → Bluetooth & devices → Devices**.
+2. If the Polar is not already paired, click **"Add device"** → Bluetooth,
+   wait for "Polar H10 XXXXXX" to appear, click it to pair.
+3. Click on the paired Polar → **"Device details"** (or right-click →
+   **Properties**).
+4. Look for **"Bluetooth address"** — it's the 6-pair string.
+5. Copy it and paste into the Add Device dialog.
+
+> **Tip:** The 7-character ID printed on the inside of the Polar strap
+> (e.g. *0496A33F*) is **NOT** the MAC. The MAC is longer and uses
+> colons.
+
+### EmotiBit — serial number
+
+The serial looks like **`MD-V6-0000482`** (prefix `MD-V` followed by
+version, dash, and 7 digits).
+
+1. Look at the EmotiBit's PCB or the back of its enclosure — the serial
+   is printed there.
+2. Type it exactly into the **"+ Add device…"** dialog after selecting
+   "EmotiBit".
+3. The app validates the prefix to avoid typos; if it complains, double-
+   check you typed the dashes correctly.
+
+> **Note:** The EmotiBit must be connected to the **same WiFi network**
+> as the PC before BiHome can talk to it. Configure WiFi using the
+> EmotiBit Oscilloscope app or the EmotiBit web interface — see the
+> [EmotiBit documentation](https://www.emotibit.com/) for setup.
+
+---
+
 ## Where your data lives
 
 Per-user state and recordings live in **`%APPDATA%\BiHome\`**, which is:
