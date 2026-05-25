@@ -1899,6 +1899,18 @@ class BleakPolarThread(threading.Thread):
                     elif not client.is_connected:
                         log("[BleakPolar]", "Disconnected from Polar H10")
 
+                    # Unsubscribe notifications BEFORE the context manager
+                    # disconnects. Otherwise the WinRT BLE radio may keep
+                    # the subscriptions in an inconsistent state, making
+                    # the next reconnect attempt fail.
+                    if client.is_connected:
+                        for uuid_ in (self.HR_MEAS, self.PMD_CONTROL,
+                                       self.PMD_DATA, self.BATTERY):
+                            try:
+                                await client.stop_notify(uuid_)
+                            except Exception:
+                                pass
+
             except Exception as e:
                 log("[BleakPolar]", f"BLE error: {e}")
 
@@ -2266,6 +2278,9 @@ class EmotiBitThread(threading.Thread):
         except Exception:
             pass
 
+        # Track lifecycle stage for guaranteed cleanup in the outer finally
+        prepared = False
+        streaming = False
         try:
             params = BrainFlowInputParams()
             if EMOTIBIT_IP:
@@ -2287,10 +2302,12 @@ class EmotiBitThread(threading.Thread):
             log(tag, f"Preparing session: ip={EMOTIBIT_IP or 'broadcast'}, "
                      f"serial={sn or 'auto-discover first'}")
             self._board.prepare_session()
+            prepared = True
             log(tag, "prepare_session OK")
 
             self.health.set(state="CONNECTING", detail="start_stream")
             self._board.start_stream(45000, "")
+            streaming = True
             log(tag, "start_stream OK")
             self.health.set(state="ACTIVE", detail="connected (waiting data)")
 
@@ -2371,11 +2388,14 @@ class EmotiBitThread(threading.Thread):
             log(tag, f"Traceback (last 3 frames):")
             for line in tb.splitlines()[-6:]:
                 log(tag, f"  {line}")
-            try:
-                if self._board is not None:
-                    self._board.release_session()
-            except Exception:
-                pass
+            # Cleanup partial state from a failed setup
+            if self._board is not None:
+                if streaming:
+                    try: self._board.stop_stream()
+                    except Exception: pass
+                if prepared:
+                    try: self._board.release_session()
+                    except Exception: pass
             return
 
         while not stop_event.is_set():
@@ -2459,18 +2479,18 @@ class EmotiBitThread(threading.Thread):
 
             time.sleep(float(EMOTIBIT_POLL_INTERVAL))
 
-        try:
-            if self._board is not None:
-                try:
-                    self._board.stop_stream()
-                except Exception:
-                    pass
-                try:
-                    self._board.release_session()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        # Guaranteed cleanup: runs whether the while exited via stop_event
+        # or via an inner-exception break. Order matters: stop_stream first
+        # (uses board state), then release_session (frees board).
+        if self._board is not None:
+            if streaming:
+                try: self._board.stop_stream()
+                except Exception: pass
+                streaming = False
+            if prepared:
+                try: self._board.release_session()
+                except Exception: pass
+                prepared = False
 
         self.health.set(state="STOPPED", detail="stopped")
         log("[EmotiBit]", "Thread stopped.")
@@ -3628,15 +3648,34 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # Signal threads to wind down
         stop_event.set()
+
+        # Terminate the viewer subprocess (non-frozen mode) so it can free
+        # its LSL inlets / Qt resources before we exit
         if viewer_proc:
             try:
                 viewer_proc.terminate()
+                viewer_proc.wait(timeout=3)
+            except Exception:
+                try: viewer_proc.kill()
+                except Exception: pass
+
+        # Give threads a moment to react to stop_event then explicitly join
+        # them. Joining ensures: BLE radio is released, BrainFlow's
+        # release_session() runs, LSL outlets are torn down, sockets/handles
+        # are freed. Skipping join + os._exit leaks all of these.
+        time.sleep(0.3)
+        for t in threads:
+            try:
+                t.join(timeout=2.5)
             except Exception:
                 pass
-        time.sleep(0.5)
+
         print("Shutdown complete.", flush=True)
-        # Force-exit so any lingering daemon threads don't keep the process alive
+        # Force-exit as a last resort if a daemon thread is wedged
+        # (e.g. native BLE callback stuck). Joined threads above should
+        # have done the heavy lifting before we get here.
         os._exit(0)
 
     wifi_thread: Optional[ArduinoWiFiECGThread] = None

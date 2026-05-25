@@ -414,6 +414,10 @@ class MarkerStream:
             pass
         self.outlet = pylsl.StreamOutlet(info)
 
+        # Lock guards _current and _pulse_until which are touched from both
+        # the UI thread (trigger/set_state) and the publisher thread (_run).
+        self._state_lock = threading.Lock()
+
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -430,13 +434,15 @@ class MarkerStream:
         period = 1.0 / self.RATE
         while not self._stop.is_set():
             try:
-                # If a pulse is active and has elapsed, reset to 0
-                if self.type == "event" and self._pulse_until > 0:
-                    if pylsl.local_clock() >= self._pulse_until:
-                        self._current = 0.0
-                        self._pulse_until = 0.0
                 ts = pylsl.local_clock()
-                self.outlet.push_sample([float(self._current)], timestamp=ts)
+                # Atomically: check pulse expiration + read _current
+                with self._state_lock:
+                    if self.type == "event" and self._pulse_until > 0:
+                        if ts >= self._pulse_until:
+                            self._current = 0.0
+                            self._pulse_until = 0.0
+                    val = self._current
+                self.outlet.push_sample([float(val)], timestamp=ts)
             except Exception:
                 pass
             time.sleep(period)
@@ -449,8 +455,9 @@ class MarkerStream:
         if self.type != "event":
             return
         ts = pylsl.local_clock()
-        self._current = 1.0
-        self._pulse_until = ts + self.EVENT_PULSE_S
+        with self._state_lock:
+            self._current = 1.0
+            self._pulse_until = ts + self.EVENT_PULSE_S
         try:
             # Push the 1.0 with precise click timestamp (leading edge)
             self.outlet.push_sample([1.0], timestamp=ts)
@@ -464,7 +471,8 @@ class MarkerStream:
         if not (0 <= idx < max(1, len(self.states))):
             return
         ts = pylsl.local_clock()
-        self._current = float(idx)
+        with self._state_lock:
+            self._current = float(idx)
         try:
             self.outlet.push_sample([self._current], timestamp=ts)
         except Exception:
@@ -472,6 +480,16 @@ class MarkerStream:
 
     def stop(self):
         self._stop.set()
+        # Join the publisher and release the LSL outlet so its UDP/TCP
+        # sockets are freed promptly on app exit
+        try:
+            self._thread.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self.outlet = None  # drop reference → pylsl finaliser closes it
+        except Exception:
+            pass
 
 
 class MarkerConfigDialog(QtWidgets.QDialog):
