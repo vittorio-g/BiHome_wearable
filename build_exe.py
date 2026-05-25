@@ -39,9 +39,11 @@ args = [
     "--clean",
     "--name", "BiHome Wearable",
     "--icon", icon_path,
-    # Temporarily keep console visible to debug BLE connection issues.
-    # Change to "--windowed" once stable for a clean user experience.
-    "--console",
+    # Windowed mode: no terminal pops up alongside the app. Diagnostics
+    # go to %APPDATA%/BiHome/acquisition.log instead of stdout (the log()
+    # helper in BiHome_wearable.py handles this automatically).
+    # If you ever need to debug, swap "--windowed" for "--console" here.
+    "--windowed",
     "--onedir",                            # bundle dependencies in a folder
     # Embed the viewer script + Viewer assets so subprocess can find them
     "--add-data", f"{os.path.join(HERE, 'Viewer')}{os.pathsep}Viewer",
