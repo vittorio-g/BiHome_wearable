@@ -314,6 +314,47 @@ ready_event = threading.Event()  # set quando tutti i dispositivi abilitati sono
 # =====================================================
 
 @dataclass
+class MonotonicGuard:
+    """Track per-stream last-pushed timestamp to detect out-of-order pushes.
+    LSL silently drops non-monotonic samples (with a warning to its own
+    stderr that user-app code never sees). This guard logs once-per-stream
+    when violations occur so we can diagnose clock-sync issues.
+
+    Usage:
+        _guard = MonotonicGuard()
+        if _guard.check(stream_name, timestamp):
+            outlet.push_sample(vals, timestamp=timestamp)
+    """
+    def __init__(self, max_warn_per_stream: int = 3):
+        self._last_ts: Dict[str, float] = {}
+        self._warn_count: Dict[str, int] = {}
+        self._max_warn = max_warn_per_stream
+        self._lock = threading.Lock()
+
+    def check(self, stream_name: str, ts: float) -> bool:
+        """Return True if ts is monotonic (>= last). Otherwise log and
+        return False (caller can choose to skip, push with previous+epsilon,
+        or accept the LSL drop)."""
+        with self._lock:
+            prev = self._last_ts.get(stream_name)
+            if prev is None or ts >= prev:
+                self._last_ts[stream_name] = ts
+                return True
+            n = self._warn_count.get(stream_name, 0) + 1
+            self._warn_count[stream_name] = n
+            if n <= self._max_warn:
+                log("[MonotonicGuard]",
+                    f"stream='{stream_name}' ts={ts:.6f} < prev={prev:.6f} "
+                    f"(delta {(prev - ts) * 1000:.1f} ms) — sample dropped"
+                    + (f"  [{self._max_warn} warnings max per stream]"
+                       if n == self._max_warn else ""))
+            return False
+
+
+# Global guard shared across all threads (thread-safe internally)
+_monotonic_guard = MonotonicGuard()
+
+
 class DeviceHealth:
     name: str
     enabled: bool
@@ -1858,12 +1899,42 @@ class BleakPolarThread(threading.Thread):
             log("[BleakPolar]", f"First ECG data -> LSL '{sname}' ({nsamp} samples)")
             self._printed_first[lbl] = True
 
+    def _push_disconnect_sentinel(self):
+        """Push a single NaN sample to every Polar outlet at the moment of
+        a disconnect. Marks the gap in the LSL recording so post-hoc
+        analysis can tell missing data from quiet signal."""
+        ts = float(local_clock())
+        for lbl, (sname, ch_labels, _srate) in self.label_map.items():
+            outlet = self.outlets.get(lbl)
+            if outlet is None:
+                continue
+            nan_vals = [float('nan')] * len(ch_labels)
+            try:
+                outlet.push_sample(nan_vals, timestamp=ts)
+            except Exception:
+                pass
+
+    # Max age (seconds) of an ACC sample considered "fresh enough" to
+    # interpolate against. Beyond this we return NaN to signal that the
+    # ACC stream has stalled rather than using stale 4-second-old values.
+    ACC_MAX_AGE_S = 1.5
+
     def _interp_acc(self, ts_host: float) -> List[float]:
-        """Linearly interpolate ACC at an ECG timestamp from the ACC ring."""
+        """Linearly interpolate ACC at an ECG timestamp from the ACC ring.
+        Returns NaN if the ECG sample falls outside the ring's recent
+        bounds — better than feeding stale values to downstream analysis."""
         ring = self._acc_ring
         if not ring:
             return [float('nan')] * 3
+        # If the most recent ACC sample is too old, the ACC stream has
+        # likely stalled. Returning NaN here is the safe signal.
+        if ts_host - ring[-1][0] > self.ACC_MAX_AGE_S:
+            return [float('nan')] * 3
         if len(ring) == 1 or ts_host <= ring[0][0]:
+            # ECG is older than oldest ACC sample → no interpolation
+            # is safe; use nearest only if very close (< ACC_MAX_AGE_S)
+            if ring[0][0] - ts_host > self.ACC_MAX_AGE_S:
+                return [float('nan')] * 3
             return [ring[0][1], ring[0][2], ring[0][3]]
         if ts_host >= ring[-1][0]:
             return [ring[-1][1], ring[-1][2], ring[-1][3]]
@@ -1943,7 +2014,10 @@ class BleakPolarThread(threading.Thread):
             return
         self._last_battery_pct = pct
         try:
-            self.battery_outlet.push_sample([float(pct)])
+            # Explicit timestamp at moment of receipt — avoids implicit
+            # "now" jitter on LabRecorder when battery changes are rare
+            self.battery_outlet.push_sample([float(pct)],
+                                             timestamp=float(local_clock()))
             log("[BleakPolar]", f"Battery: {pct}%")
         except Exception:
             pass
@@ -2045,8 +2119,14 @@ class BleakPolarThread(threading.Thread):
                             except Exception:
                                 pass
 
+                    # Push a NaN sentinel sample so offline analysis can
+                    # distinguish "device disconnected" from "low-amplitude
+                    # signal". A single NaN per channel at local_clock() now.
+                    self._push_disconnect_sentinel()
+
             except Exception as e:
                 log("[BleakPolar]", f"BLE error: {e}")
+                self._push_disconnect_sentinel()
 
             if stop_event.is_set():
                 break
@@ -2119,25 +2199,28 @@ class EmotiBitThread(threading.Thread):
                 "battery_sid": "emotibit_battery",
             }
 
+        # Native EmotiBit sample rates (per BrainFlow board_descr):
+        # IMU 25 Hz, PPG 25 Hz, EDA/TEMP 15 Hz. Declaring them lets
+        # LabRecorder and downstream tools detect stalls and gaps.
         self.out_imu = make_lsl_outlet(
             stream_name=sn["imu_name"],
             stream_type="BIO",
             channel_labels=["acc_x","acc_y","acc_z","gyro_x","gyro_y","gyro_z","mag_x","mag_y","mag_z"],
-            nominal_srate=0.0,
+            nominal_srate=25.0,
             source_id=sn["imu_sid"],
         )
         self.out_ppg = make_lsl_outlet(
             stream_name=sn["ppg_name"],
             stream_type="BIO",
             channel_labels=["ppg_0","ppg_1","ppg_2"],
-            nominal_srate=0.0,
+            nominal_srate=25.0,
             source_id=sn["ppg_sid"],
         )
         self.out_eda_temp = make_lsl_outlet(
             stream_name=sn["eda_temp_name"],
             stream_type="BIO",
             channel_labels=["eda","temp"],
-            nominal_srate=0.0,
+            nominal_srate=15.0,
             source_id=sn["eda_temp_sid"],
         )
 
@@ -2246,7 +2329,9 @@ class EmotiBitThread(threading.Thread):
             return
         self._last_battery_pct = pct
         try:
-            self.battery_outlet.push_sample([pct])
+            # Explicit timestamp — see note on Polar battery push
+            self.battery_outlet.push_sample([pct],
+                                             timestamp=float(local_clock()))
             log("[EmotiBit]", f"Battery: {pct:.0f}%")
         except Exception:
             pass
@@ -2318,31 +2403,57 @@ class EmotiBitThread(threading.Thread):
             return 0
 
         # ── 2. Synthesize per-sample timestamps at native rate ──
+        # We interpolate the host-clock offset across the batch to avoid
+        # the step discontinuity at batch boundaries: the offset BEFORE
+        # this batch applies to the first sample, the offset AFTER the
+        # _update_clock applies to the last sample, and inner samples
+        # get a linear blend.
         host_now = float(local_clock())
+        offset_before = self.offset_ema  # may be None on the very first batch
         try:
             t_dev_last = float(data[ts_row, -1])
-            self._update_clock(t_dev_last, host_now)
+            self._update_clock(t_dev_last, host_now)  # updates offset_ema
             t_dev_first = float(data[ts_row, 0])
         except Exception:
             t_dev_first = host_now
             t_dev_last = host_now
+        offset_after = self.offset_ema if self.offset_ema is not None else 0.0
+        if offset_before is None:
+            offset_before = offset_after
 
-        # Anchor host time at first sample of this batch (using BrainFlow's
-        # ts as reference, then offset to host clock domain via clock EMA).
-        host_first = self._dev_to_host(t_dev_first, host_now)
+        # Per-sample offset: linearly blends from offset_before to offset_after
+        # across n_samp samples. With small alpha (EMOTIBIT_CLOCK_ALPHA = 0.02)
+        # the per-batch delta is tiny but cumulative.
+        if n_samp >= 2:
+            offsets_per = np.linspace(offset_before, offset_after, n_samp)
+        else:
+            offsets_per = np.array([offset_after])
 
+        # Track gap positions so we can push a NaN sentinel at each gap
+        # for offline-analysis tools (otherwise a gap looks like a phase
+        # jump or a slow segment and corrupts spectral analysis).
+        gap_positions = []  # list of indices BEFORE which a NaN sample is inserted
+        gap_ts_per = []     # timestamp for each NaN insertion
         if pkg is not None and len(pkg) > 1:
-            # Use package-number deltas relative to first sample
+            # Use package-number deltas for the relative timing within the
+            # batch, but apply the interpolated offset point-by-point.
             pkg_origin = pkg[0]
-            ts_per = host_first + (pkg - pkg_origin).astype(np.float64) / native_fs
+            t_dev_arr = t_dev_first + (pkg - pkg_origin).astype(np.float64) / native_fs
+            ts_per = t_dev_arr - offsets_per
             # Detect gaps
-            n_gaps = int(((np.diff(pkg) - 1) > 0).sum())
+            diffs = np.diff(pkg)
+            n_gaps = int(((diffs - 1) > 0).sum())
             if n_gaps > 0:
                 self._gaps[preset] += n_gaps
+                for i, d in enumerate(diffs):
+                    if d > 1:
+                        # Insert NaN at midpoint between pkg[i] and pkg[i+1]
+                        gap_positions.append(i + 1)
+                        gap_ts_per.append((ts_per[i] + ts_per[i + 1]) * 0.5)
         else:
             # Fallback: linear interpolation between first/last BrainFlow ts
-            host_last = self._dev_to_host(t_dev_last, host_now)
-            ts_per = np.linspace(host_first, host_last, n_samp)
+            t_dev_arr = np.linspace(t_dev_first, t_dev_last, n_samp)
+            ts_per = t_dev_arr - offsets_per
 
         # ── 3. Smooth stair-step on specified columns (e.g. temperature) ──
         # BrainFlow upsamples 7.5 Hz temperature to 15 Hz by sample-and-hold.
@@ -2359,10 +2470,22 @@ class EmotiBitThread(threading.Thread):
                     data[row] = smoothed
 
         # ── 4. Push samples to LSL ──
+        # Insert a NaN-filled sentinel at each detected gap so offline
+        # analysis can distinguish "missing data" from "low-amplitude signal".
+        # Iterate over gap_positions in order; before pushing sample i,
+        # if i matches a gap position, push the NaN sample first.
         n_ch = len(indices)
         pushed = 0
+        nan_vals = [float('nan')] * n_ch
+        gap_iter = iter(zip(gap_positions, gap_ts_per))
+        next_gap = next(gap_iter, None)
         try:
             for i in range(n_samp):
+                # Pre-pend any gap sentinel that falls at this index
+                while next_gap is not None and next_gap[0] == i:
+                    outlet.push_sample(nan_vals, timestamp=float(next_gap[1]))
+                    pushed += 1
+                    next_gap = next(gap_iter, None)
                 vals = [float(data[indices[j], i]) for j in range(n_ch)]
                 if filters is not None:
                     vals = [filters[j].apply(vals[j])
@@ -3493,11 +3616,20 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
 # Wizard defaults — stored in the per-user writable dir (set near top of file)
 _WIZARD_DEFAULTS_FILE = os.path.join(_WRITABLE_DIR, "wizard_defaults.json")
 
+_WIZARD_SCHEMA_VERSION = 1
+
 def _load_wizard_defaults() -> dict:
+    """Load wizard defaults JSON. Returns {} on missing/corrupted/incompatible
+    file so the wizard falls back to first-run defaults safely."""
     try:
         import json
         with open(_WIZARD_DEFAULTS_FILE) as f:
-            return json.load(f)
+            data = json.load(f)
+        # Reject incompatible schema (future-proofs key renames)
+        ver = data.get("_schema_version", 1)  # legacy files lack this → assume v1
+        if ver != _WIZARD_SCHEMA_VERSION:
+            return {}
+        return data
     except Exception:
         return {}
 
@@ -3505,6 +3637,7 @@ def _save_wizard_defaults(configs, n_participants):
     try:
         import json
         data = {
+            "_schema_version": _WIZARD_SCHEMA_VERSION,
             "n_participants": n_participants,
             "participant_codes": [c.participant_id for c in configs],
         }

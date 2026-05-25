@@ -409,13 +409,18 @@ class MarkerStream:
             stream_name = f"Marker_{name}"
 
         ch_label = "event" if stream_type == "event" else "state"
+        # int32 is the canonical LSL marker format for discrete codes
+        # (event = 0/1, state = state index). Float32 was wasting precision
+        # for integer values and could confuse downstream tools.
+        # time_ns() in source_id prevents collisions when two markers are
+        # created in the same wall-clock second.
         info = pylsl.StreamInfo(
             name=stream_name,
             type="Markers",
             channel_count=1,
             nominal_srate=self.RATE,
-            channel_format="float32",
-            source_id=f"marker_{participant_id.lower()}_{name}_{int(time.time())}",
+            channel_format="int32",
+            source_id=f"marker_{participant_id.lower()}_{name}_{time.time_ns()}",
         )
         try:
             chns = info.desc().append_child("channels")
@@ -460,7 +465,7 @@ class MarkerStream:
                             self._current = 0.0
                             self._pulse_until = 0.0
                     val = self._current
-                self.outlet.push_sample([float(val)], timestamp=ts)
+                self.outlet.push_sample([int(val)], timestamp=ts)
             except Exception:
                 pass
             time.sleep(period)
@@ -478,7 +483,7 @@ class MarkerStream:
             self._pulse_until = ts + self.EVENT_PULSE_S
         try:
             # Push the 1.0 with precise click timestamp (leading edge)
-            self.outlet.push_sample([1.0], timestamp=ts)
+            self.outlet.push_sample([1], timestamp=ts)
         except Exception:
             pass
 
@@ -492,7 +497,7 @@ class MarkerStream:
         with self._state_lock:
             self._current = float(idx)
         try:
-            self.outlet.push_sample([self._current], timestamp=ts)
+            self.outlet.push_sample([int(self._current)], timestamp=ts)
         except Exception:
             pass
 
@@ -2413,6 +2418,7 @@ class Viewer(QtWidgets.QMainWindow):
             pass
 
         settings = {
+            "_schema_version": 1,
             "window_s": self.win_spin.value(),
             "window_geometry": {
                 "x": self.x(), "y": self.y(),
@@ -2432,7 +2438,9 @@ class Viewer(QtWidgets.QMainWindow):
             print(f"[Settings] Save error: {e}")
 
     def _load_settings(self):
-        """Load saved settings and apply to UI."""
+        """Load saved settings and apply to UI. Silently skips files with
+        an incompatible schema_version so a future format change can't
+        crash older builds."""
         if not os.path.isfile(SETTINGS_FILE):
             return
         try:
@@ -2440,6 +2448,9 @@ class Viewer(QtWidgets.QMainWindow):
                 s = json.load(f)
         except Exception as e:
             print(f"[Settings] Load error: {e}")
+            return
+        if s.get("_schema_version", 1) != 1:
+            print(f"[Settings] Schema version mismatch — using defaults.")
             return
 
         # Window size
