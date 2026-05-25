@@ -73,6 +73,15 @@ def _resolve_app_data_dir() -> str:
 
 
 _WRITABLE_DIR = _resolve_app_data_dir()
+
+
+def _safe_print(*args, **kwargs):
+    """print() that can't crash when stdout is None (--windowed exe)."""
+    try:
+        print(*args, **kwargs)
+    except Exception:
+        pass
+
 _FONT_DIR = os.path.join(_HERE, "fonts")
 _REC_DIR = os.path.join(os.path.dirname(_HERE), "LabRecorder")
 LABRECORDER_CLI = os.path.join(_REC_DIR, "LabRecorderCLI.exe")
@@ -223,13 +232,13 @@ class Reader(threading.Thread):
     def run(self):
         inlet, nch = self.st.inlet, len(self.st.ch_labels)
         total = 0
-        print(f"[Reader] start '{self.st.name}' ({nch} ch)")
+        _safe_print(f"[Reader] start '{self.st.name}' ({nch} ch)")
         while not self._stop.is_set():
             try:
                 samples, timestamps = inlet.pull_chunk(
                     timeout=0.05, max_samples=PULL_CHUNK)
             except Exception as e:
-                print(f"[Reader] err '{self.st.name}': {e}"); break
+                _safe_print(f"[Reader] err '{self.st.name}': {e}"); break
             if not timestamps:
                 continue
             now = pylsl.local_clock()
@@ -242,11 +251,11 @@ class Reader(threading.Thread):
                 self.st.bufs[ci].append_batch(ts_np, smp_np[:, ci])
 
             if total == 0:
-                print(f"[Reader] first data '{self.st.name}': {len(timestamps)} smp, "
+                _safe_print(f"[Reader] first data '{self.st.name}': {len(timestamps)} smp, "
                       f"ts0={timestamps[0]:.3f}, now={now:.3f}, "
                       f"delta={now - timestamps[0]:.1f}s")
             total += len(timestamps)
-        print(f"[Reader] stop '{self.st.name}' ({total} total)")
+        _safe_print(f"[Reader] stop '{self.st.name}' ({total} total)")
 
     def stop(self):
         self._stop.set()
@@ -1358,9 +1367,9 @@ class Viewer(QtWidgets.QMainWindow):
             flag_path = os.path.join(_WRITABLE_DIR, "reconnect.flag")
             with open(flag_path, "w") as f:
                 f.write(str(time.time()))
-            print("[Refresh] Wrote reconnect flag for backend BLE reset")
+            _safe_print("[Refresh] Wrote reconnect flag for backend BLE reset")
         except Exception as e:
-            print(f"[Refresh] Could not write reconnect flag: {e}")
+            _safe_print(f"[Refresh] Could not write reconnect flag: {e}")
 
     def _style_btn(self, btn, small=False):
         """Apply consistent button styling."""
@@ -1411,7 +1420,7 @@ class Viewer(QtWidgets.QMainWindow):
                 inlet.open_stream(timeout=5.0)
                 fi = inlet.info()
             except Exception as e:
-                print(f"[LSL] err opening {info.name()}: {e}"); continue
+                _safe_print(f"[LSL] err opening {info.name()}: {e}"); continue
 
             labels = []
             ch = fi.desc().child("channels").child("channel")
@@ -1440,7 +1449,7 @@ class Viewer(QtWidgets.QMainWindow):
                 ch_labels=labels, inlet=inlet, state_labels=state_labels,
             )
             new_states.append((key, st))
-            print(f"[LSL] opened '{info.name()}' ({info.type()}, "
+            _safe_print(f"[LSL] opened '{info.name()}' ({info.type()}, "
                   f"{info.nominal_srate():.0f}Hz, {nch}ch, id={info.source_id()})")
 
         if new_states:
@@ -2230,7 +2239,7 @@ class Viewer(QtWidgets.QMainWindow):
                 cb.setEnabled(False)
             self.rec_status.setText(f"Recording to: {name}")
             self.rec_status.setStyleSheet(f"font-size: 10px; color: {RED_REC};")
-            print(f"[REC] Started: {' '.join(cmd)}")
+            _safe_print(f"[REC] Started: {' '.join(cmd)}")
         except Exception as e:
             self.rec_status.setText(f"ERROR: {e}")
             self.rec_btn.setChecked(False)
@@ -2245,7 +2254,7 @@ class Viewer(QtWidgets.QMainWindow):
                 except subprocess.TimeoutExpired:
                     self._rec_proc.kill()
             except Exception as e:
-                print(f"[REC] Stop error: {e}")
+                _safe_print(f"[REC] Stop error: {e}")
                 try:
                     self._rec_proc.kill()
                 except Exception:
@@ -2260,7 +2269,7 @@ class Viewer(QtWidgets.QMainWindow):
         for cb in self._stream_rec_cbs.values():
             cb.setEnabled(True)
         self.rec_status.setStyleSheet(f"font-size: 10px; color: {GREEN_OK};")
-        print(f"[REC] Stopped. File: {self._rec_file} ({elapsed:.1f}s)")
+        _safe_print(f"[REC] Stopped. File: {self._rec_file} ({elapsed:.1f}s)")
 
         # Export CSVs from XDF in background
         xdf_path = self._rec_file
@@ -2277,11 +2286,11 @@ class Viewer(QtWidgets.QMainWindow):
             import pyxdf
             streams, header = pyxdf.load_xdf(xdf_path)
         except ImportError:
-            print("[REC] pyxdf not installed — skipping CSV export (pip install pyxdf)")
+            _safe_print("[REC] pyxdf not installed — skipping CSV export (pip install pyxdf)")
             self._update_rec_status_safe("CSV skipped (pyxdf not installed)")
             return
         except Exception as e:
-            print(f"[REC] XDF load error: {e}")
+            _safe_print(f"[REC] XDF load error: {e}")
             self._update_rec_status_safe(f"CSV error: {e}")
             return
 
@@ -2332,9 +2341,9 @@ class Viewer(QtWidgets.QMainWindow):
                             row.append(f"{data[i]}")
                         f.write(",".join(row) + "\n")
                 exported.append(safe_name)
-                print(f"[REC] CSV exported: {csv_path} ({len(ts)} samples)")
+                _safe_print(f"[REC] CSV exported: {csv_path} ({len(ts)} samples)")
             except Exception as e:
-                print(f"[REC] CSV export error for {name}: {e}")
+                _safe_print(f"[REC] CSV export error for {name}: {e}")
 
         msg = f"XDF + {len(exported)} CSV exported"
         self._update_rec_status_safe(msg)
@@ -2367,9 +2376,9 @@ class Viewer(QtWidgets.QMainWindow):
                     for ts_a, vs_a in snaps:
                         row.append(f"{vs_a[i]}" if i < len(vs_a) else "")
                     f.write(",".join(row) + "\n")
-            print(f"[DIAG] saved '{st.name}' ({len(ref_ts)} smp) -> {path}")
+            _safe_print(f"[DIAG] saved '{st.name}' ({len(ref_ts)} smp) -> {path}")
         except Exception as e:
-            print(f"[DIAG] err: {e}")
+            _safe_print(f"[DIAG] err: {e}")
 
     # ── settings persistence ────────────────────────────────────────────
 
@@ -2433,9 +2442,9 @@ class Viewer(QtWidgets.QMainWindow):
         try:
             with open(SETTINGS_FILE, "w") as f:
                 json.dump(settings, f, indent=2)
-            print(f"[Settings] Saved to {SETTINGS_FILE}")
+            _safe_print(f"[Settings] Saved to {SETTINGS_FILE}")
         except Exception as e:
-            print(f"[Settings] Save error: {e}")
+            _safe_print(f"[Settings] Save error: {e}")
 
     def _load_settings(self):
         """Load saved settings and apply to UI. Silently skips files with
@@ -2447,10 +2456,10 @@ class Viewer(QtWidgets.QMainWindow):
             with open(SETTINGS_FILE) as f:
                 s = json.load(f)
         except Exception as e:
-            print(f"[Settings] Load error: {e}")
+            _safe_print(f"[Settings] Load error: {e}")
             return
         if s.get("_schema_version", 1) != 1:
-            print(f"[Settings] Schema version mismatch — using defaults.")
+            _safe_print(f"[Settings] Schema version mismatch — using defaults.")
             return
 
         # Window size
@@ -2476,7 +2485,7 @@ class Viewer(QtWidgets.QMainWindow):
         # Cache plot-window geometry for later (applied in _get_or_create_plot_window)
         self._saved_plot_windows = s.get("plot_windows", {})
 
-        print(f"[Settings] Loaded from {SETTINGS_FILE}")
+        _safe_print(f"[Settings] Loaded from {SETTINGS_FILE}")
 
     def _apply_stream_settings(self):
         """Apply per-stream/channel settings after streams are discovered."""
@@ -2553,7 +2562,7 @@ def _load_fonts():
                 if fid >= 0:
                     families = db.applicationFontFamilies(fid)
                     if families:
-                        print(f"[Font] loaded: {families[0]} ({fn})")
+                        _safe_print(f"[Font] loaded: {families[0]} ({fn})")
 
 def _app_icon() -> 'QtGui.QIcon':
     """Load the BiHome logo as a QIcon, or return an empty icon if missing."""

@@ -53,6 +53,15 @@ def _resolve_app_data_dir() -> str:
 _WRITABLE_DIR = _resolve_app_data_dir()
 
 
+def _safe_print(*args, **kwargs):
+    """print() that can't crash when stdout is None (e.g. --windowed
+    PyInstaller build) or when the OS pipe has been closed."""
+    try:
+        print(*args, **kwargs)
+    except Exception:
+        pass
+
+
 def _migrate_legacy_state():
     """One-time migration of state files from the script/exe dir to the new
     per-user writable dir. Silently skips files that don't exist or are
@@ -69,7 +78,7 @@ def _migrate_legacy_state():
         if os.path.isfile(old) and not os.path.isfile(new):
             try:
                 _sh.move(old, new)
-                print(f"[Migration] moved {fn} → {_WRITABLE_DIR}")
+                _safe_print(f"[Migration] moved {fn} → {_WRITABLE_DIR}")
             except Exception:
                 pass
     # Also check Viewer/ subdir for legacy viewer_settings.json
@@ -78,7 +87,38 @@ def _migrate_legacy_state():
     if os.path.isfile(legacy_viewer) and not os.path.isfile(new_viewer):
         try:
             _sh.move(legacy_viewer, new_viewer)
-            print(f"[Migration] moved Viewer/viewer_settings.json → {_WRITABLE_DIR}")
+            _safe_print(f"[Migration] moved Viewer/viewer_settings.json → {_WRITABLE_DIR}")
+        except Exception:
+            pass
+
+    # R4: also migrate recordings/ and diag/ folders that legacy versions
+    # placed inside the project root or the Viewer/ folder.
+    for legacy_sub_path in (
+        os.path.join(legacy_root, "recordings"),
+        os.path.join(legacy_root, "Viewer", "recordings"),
+        os.path.join(legacy_root, "Viewer", "diag"),
+    ):
+        if not os.path.isdir(legacy_sub_path):
+            continue
+        sub_name = os.path.basename(legacy_sub_path)
+        new_sub = os.path.join(_WRITABLE_DIR, sub_name)
+        try:
+            os.makedirs(new_sub, exist_ok=True)
+            for fname in os.listdir(legacy_sub_path):
+                old_fp = os.path.join(legacy_sub_path, fname)
+                new_fp = os.path.join(new_sub, fname)
+                if not os.path.exists(new_fp):
+                    try:
+                        _sh.move(old_fp, new_fp)
+                    except Exception:
+                        pass
+            # Remove the legacy folder if it's now empty
+            try:
+                if not os.listdir(legacy_sub_path):
+                    os.rmdir(legacy_sub_path)
+                    _safe_print(f"[Migration] moved {sub_name}/ → {_WRITABLE_DIR}")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -141,15 +181,12 @@ POLAR_LABEL_MAP = {
 # preserved. End-users add their own devices via the wizard, no source
 # editing required.
 
-_DEFAULT_KNOWN_POLAR = {
-    "Polar 1":    ("24:AC:AC:04:96:A3", "0496A33F"),
-    "Polar 2":    ("24:AC:AC:04:93:ED", "0493ED32"),
-}
-
-_DEFAULT_KNOWN_EMOTIBIT = {
-    "EmotiBit 1": ("MD-V6-0000482", ""),
-    "EmotiBit 2": ("MD-V6-0000089", ""),
-}
+# Seeds are intentionally empty: hardcoding MACs / serials would force
+# every new user to delete entries that don't match their hardware. End
+# users register their own devices via the "+ Add device…" button in the
+# wizard (writes to devices.json in the app dir).
+_DEFAULT_KNOWN_POLAR: Dict[str, Tuple] = {}
+_DEFAULT_KNOWN_EMOTIBIT: Dict[str, Tuple] = {}
 
 _DEVICES_JSON_PATH = os.path.join(_WRITABLE_DIR, "devices.json")
 _DEVICES_SCHEMA_VERSION = 1
@@ -2026,12 +2063,28 @@ class BleakPolarThread(threading.Thread):
         """Main async loop: connect, subscribe, stream, auto-reconnect."""
         from bleak import BleakClient, BleakScanner
 
+        # Number of consecutive failed connection attempts. After 3 we
+        # downgrade the per-device health detail to a user-friendly hint
+        # so the connection dialog shows something actionable rather than
+        # "scanning for XX:XX:XX..." forever.
+        consecutive_failures = 0
         while not stop_event.is_set():
-            self.health.set(state="CONNECTING", detail=f"scanning for {self.address}")
+            if consecutive_failures >= 3:
+                self.health.set(
+                    state="CONNECTING",
+                    detail=f"device {self.address} unreachable — check it's on, "
+                           f"in range, and not paired with another app")
+            else:
+                self.health.set(state="CONNECTING", detail=f"scanning for {self.address}")
             log("[BleakPolar]", f"Connecting to Polar H10 at {self.address}...")
 
             try:
-                async with BleakClient(self.address) as client:
+                # BleakClient timeout: pass explicit value so we don't sit
+                # for 30+ s on a dead MAC. ~12 s is enough to find a Polar
+                # in the room and short enough that the dialog can show a
+                # "retry?" hint quickly when it's actually offline.
+                async with BleakClient(self.address, timeout=12.0) as client:
+                    consecutive_failures = 0  # reset on successful open
                     mtu = getattr(client, 'mtu_size', '?')
                     log("[BleakPolar]", f"Connected! MTU={mtu}")
                     self.health.set(state="ACTIVE", connected_at=float(local_clock()), detail="connected")
@@ -2125,7 +2178,9 @@ class BleakPolarThread(threading.Thread):
                     self._push_disconnect_sentinel()
 
             except Exception as e:
-                log("[BleakPolar]", f"BLE error: {e}")
+                consecutive_failures += 1
+                log("[BleakPolar]",
+                    f"BLE error (attempt {consecutive_failures}): {e}")
                 self._push_disconnect_sentinel()
 
             if stop_event.is_set():
@@ -2414,10 +2469,25 @@ class EmotiBitThread(threading.Thread):
             t_dev_last = float(data[ts_row, -1])
             self._update_clock(t_dev_last, host_now)  # updates offset_ema
             t_dev_first = float(data[ts_row, 0])
-        except Exception:
+        except Exception as _clock_exc:
             t_dev_first = host_now
             t_dev_last = host_now
-        offset_after = self.offset_ema if self.offset_ema is not None else 0.0
+            # When clock update fails (e.g. malformed first/last column), we
+            # cannot trust the resulting timestamps. Log the issue once so
+            # we don't silently produce mis-aligned samples for a whole run.
+            if not getattr(self, "_clock_exc_logged", False):
+                log("[EmotiBit]",
+                    f"WARNING: clock update failed ({type(_clock_exc).__name__}: "
+                    f"{_clock_exc}). Timestamps will fall back to host_now until "
+                    f"the next successful batch. This will appear ONLY ONCE.")
+                self._clock_exc_logged = True
+        # offset_after: prefer the freshly-updated EMA; if it's still None
+        # (very first batch raised before _update_clock could run), reuse
+        # offset_before (also None → both default to 0.0). Final NaN-safe
+        # default ensures we never produce undefined timestamps.
+        offset_after = self.offset_ema
+        if offset_after is None:
+            offset_after = offset_before if offset_before is not None else 0.0
         if offset_before is None:
             offset_before = offset_after
 
@@ -2474,8 +2544,14 @@ class EmotiBitThread(threading.Thread):
         # analysis can distinguish "missing data" from "low-amplitude signal".
         # Iterate over gap_positions in order; before pushing sample i,
         # if i matches a gap position, push the NaN sample first.
+        # Track real-sample pushes separately from NaN-sentinel pushes so
+        # we only fire first_data=True when we have actual sensor data.
+        # Without this, a batch consisting entirely of gap sentinels (rare
+        # but possible after a long disconnect) would falsely declare the
+        # device "streaming" while no real samples have arrived yet.
         n_ch = len(indices)
         pushed = 0
+        pushed_real = 0
         nan_vals = [float('nan')] * n_ch
         gap_iter = iter(zip(gap_positions, gap_ts_per))
         next_gap = next(gap_iter, None)
@@ -2497,17 +2573,21 @@ class EmotiBitThread(threading.Thread):
                 # Polar (BleakPolarThread) doesn't gate either, so we don't.
                 outlet.push_sample(vals, timestamp=float(ts_per[i]))
                 pushed += 1
+                pushed_real += 1
         except Exception:
             return pushed
 
         self._pushed[preset] = self._pushed.get(preset, 0) + pushed
 
-        if pushed > 0:
+        # first_data only fires on REAL samples — NaN sentinels don't count
+        if pushed_real > 0:
             now2 = float(local_clock())
             self.last_data_at = now2
             self.health.set(last_data_at=now2, first_data=True, detail="streaming")
             if not self._printed_first_data:
-                log("[EmotiBit]", f"FIRST DATA pushed ({label}, n={pushed}). Streaming to LSL.")
+                log("[EmotiBit]",
+                    f"FIRST DATA pushed ({label}, real={pushed_real} nan={pushed - pushed_real}). "
+                    f"Streaming to LSL.")
                 self._printed_first_data = True
 
         return pushed
@@ -3383,6 +3463,23 @@ def _build_assignment_dialog(n_participants, polar_online, emo_online,
     title2 = _wordmark_label(height=36)
     l2.addWidget(title2)
 
+    # ── First-launch nudge ──
+    # When the registry is empty (fresh install / new user) the dropdowns
+    # have nothing to assign. Show a clear call-to-action instead of
+    # letting the user click into a confusing "(no Polar configured)".
+    if not KNOWN_POLAR and not KNOWN_EMOTIBIT:
+        nudge = Qw.QLabel(
+            "<b style='color: " + ACCENT + ";'>No devices registered yet.</b><br>"
+            "<span style='color: " + TEXT + ";'>"
+            "Click <b>'+ Add device…'</b> below to register your Polar H10 (BLE MAC) "
+            "or EmotiBit (WiFi serial number). They will be saved permanently and "
+            "appear in the dropdowns on subsequent launches.</span>")
+        nudge.setStyleSheet(
+            f"QLabel {{ background: #1e252e; border: 1px solid {ACCENT}; "
+            f"border-radius: 6px; padding: 12px; font-size: 12px; }}")
+        nudge.setWordWrap(True)
+        l2.addWidget(nudge)
+
     # ── Detected devices panel ──
     detected_box = Qw.QFrame()
     detected_box.setStyleSheet(
@@ -3897,7 +3994,7 @@ def main():
     # ── Run setup wizard ──
     configs = run_setup_wizard()
     if configs is None:
-        print("Setup cancelled.")
+        _safe_print("Setup cancelled.")
         return
 
     # ── Create per-participant threads ──
@@ -3948,13 +4045,13 @@ def main():
             log("[Main]", f"Started {h.name}")
 
     if not threads:
-        print("No devices configured. Exiting.")
+        _safe_print("No devices configured. Exiting.")
         return
 
     # ── Connection progress dialog ──
     connected = run_connection_dialog(all_healths)
     if not connected:
-        print("Connection cancelled.")
+        _safe_print("Connection cancelled.")
         stop_event.set()
         return
 
@@ -3970,7 +4067,8 @@ def main():
     else:
         if not os.path.isfile(viewer_path):
             log("[Main]", f"ERROR: viewer script not found at {viewer_path}")
-            print(f"ERROR: viewer script not found at {viewer_path}", file=sys.stderr)
+            _safe_print(f"ERROR: viewer script not found at {viewer_path}",
+                        file=sys.stderr if sys.stderr else sys.stdout)
         else:
             log("[Main]", f"Launching viewer: {viewer_path}")
             try:
@@ -4010,9 +4108,9 @@ def main():
             time.sleep(0.5)
     threading.Thread(target=_watch_reconnect_flag, daemon=True).start()
 
-    print(f"\n=== Acquisition running ({len(configs)} participants, {len(threads)} devices) ===")
-    print("Active:", ", ".join(devices))
-    print("Type 'quit' to stop.\n", flush=True)
+    _safe_print(f"\n=== Acquisition running ({len(configs)} participants, {len(threads)} devices) ===")
+    _safe_print("Active:", ", ".join(devices))
+    _safe_print("Type 'quit' to stop.\n", flush=True)
 
     # Wait for either viewer subprocess to exit OR run viewer in-process
     try:
@@ -4081,7 +4179,10 @@ def main():
             except Exception:
                 pass
 
-        print("Shutdown complete.", flush=True)
+        try:
+            log("[Main]", "Shutdown complete.")
+        except Exception:
+            pass
         # Force-exit as a last resort if a daemon thread is wedged
         # (e.g. native BLE callback stuck). Joined threads above should
         # have done the heavy lifting before we get here.
@@ -4141,36 +4242,36 @@ def main():
     mon = SystemMonitorThread(monitor_devices)
     mon.start()
 
-    print("\n=== Acquisition starting ===", flush=True)
-    print("Active devices:", ", ".join(devices) if devices else "(none)", flush=True)
+    _safe_print("\n=== Acquisition starting ===", flush=True)
+    _safe_print("Active devices:", ", ".join(devices) if devices else "(none)", flush=True)
 
-    print("LSL streams created (expected):", flush=True)
+    _safe_print("LSL streams created (expected):", flush=True)
     if ENABLE_ARDUINO_WIFI_ECG:
-        print(" - ArduinoWiFi_ECG", flush=True)
-        print(" - Clock_ArduinoWiFi_ECG", flush=True)
+        _safe_print(" - ArduinoWiFi_ECG", flush=True)
+        _safe_print(" - Clock_ArduinoWiFi_ECG", flush=True)
     if ENABLE_ARDUINO_USB_POLAR:
         for lbl, (sname, _, _) in POLAR_LABEL_MAP.items():
-            print(f" - {sname} (internal label={lbl})", flush=True)
-        print(" - Clock_ArduinoUSB_Polar", flush=True)
+            _safe_print(f" - {sname} (internal label={lbl})", flush=True)
+        _safe_print(" - Clock_ArduinoUSB_Polar", flush=True)
     if ENABLE_BLEAK_POLAR:
         for lbl, (sname, _, _) in POLAR_LABEL_MAP.items():
-            print(f" - {sname} (BLE direct, label={lbl})", flush=True)
+            _safe_print(f" - {sname} (BLE direct, label={lbl})", flush=True)
     if ENABLE_EMOTIBIT:
-        print(" - EmotiBit_IMU", flush=True)
-        print(" - EmotiBit_PPG", flush=True)
-        print(" - EmotiBit_EDA_TEMP", flush=True)
+        _safe_print(" - EmotiBit_IMU", flush=True)
+        _safe_print(" - EmotiBit_PPG", flush=True)
+        _safe_print(" - EmotiBit_EDA_TEMP", flush=True)
         if EMOTIBIT_CLOCK_STREAM:
-            print(" - Clock_EmotiBit", flush=True)
+            _safe_print(" - Clock_EmotiBit", flush=True)
 
-    print("\nNOTE:", flush=True)
-    print("  The SYSTEM monitor will report problems until ALL enabled devices are streaming.", flush=True)
+    _safe_print("\nNOTE:", flush=True)
+    _safe_print("  The SYSTEM monitor will report problems until ALL enabled devices are streaming.", flush=True)
 
-    print("\nCommands:", flush=True)
-    print("  quit                      -> stop everything", flush=True)
-    print("  wifi:<cmd>                -> send <cmd> to Arduino WiFi (TCP)", flush=True)
-    print("  polar:<cmd>               -> send <cmd> to Arduino USB (Serial)", flush=True)
-    print("  <cmd>                     -> broadcast to both Arduinos (if present)", flush=True)
-    print("Examples: led_on, led_off\n", flush=True)
+    _safe_print("\nCommands:", flush=True)
+    _safe_print("  quit                      -> stop everything", flush=True)
+    _safe_print("  wifi:<cmd>                -> send <cmd> to Arduino WiFi (TCP)", flush=True)
+    _safe_print("  polar:<cmd>               -> send <cmd> to Arduino USB (Serial)", flush=True)
+    _safe_print("  <cmd>                     -> broadcast to both Arduinos (if present)", flush=True)
+    _safe_print("Examples: led_on, led_off\n", flush=True)
 
     try:
         for line in sys.stdin:
@@ -4220,7 +4321,7 @@ def main():
         except Exception:
             pass
 
-        print("Shutdown complete.", flush=True)
+        _safe_print("Shutdown complete.", flush=True)
 
 if __name__ == "__main__":
     main() 
