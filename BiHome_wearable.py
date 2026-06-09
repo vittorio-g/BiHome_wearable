@@ -392,6 +392,7 @@ class MonotonicGuard:
 _monotonic_guard = MonotonicGuard()
 
 
+@dataclass
 class DeviceHealth:
     name: str
     enabled: bool
