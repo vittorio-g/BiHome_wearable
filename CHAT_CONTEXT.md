@@ -8,7 +8,7 @@
 > Wearable. Leggilo per intero prima di fare qualsiasi cosa. Alla fine
 > trovi il "playbook" su come continuare il lavoro.
 >
-> **Ultimo aggiornamento**: 2026-05-26
+> **Ultimo aggiornamento**: 2026-06-09
 
 ---
 
@@ -153,7 +153,19 @@ State files in `%APPDATA%/BiHome/`:
 - Funzione `_pick_ble_device_dialog()` (scanner BLE in-app)
 - Hint sulla scoperta MAC in DISTRIBUTION.md
 
-**Post-4.1 (questo turno):**
+**Post-4.1.1 — run-from-source hardening (2026-06-09):**
+- Fix critico zombie-killer (`_kill_zombie_python_instances`): da sorgente via
+  venv, `python.exe` è uno **shim launcher** che spawna l'interprete reale come
+  figlio → due `python.exe` con cmdline identica. Il killer escludeva solo il
+  proprio `os.getpid()` (il figlio) e killava il **parent shim**, suicidando
+  l'app subito dopo il wizard. Ora protegge l'intera catena di antenati del
+  processo corrente (walk via ParentProcessId). No-op in modalità .exe (un solo
+  processo). Bug invisibile sulla dev machine (Anaconda/.exe non doppio-spawnano).
+- `.gitignore`: aggiunti `.venv/`, `venv/`, `LabRecorder/generic/` (sottocartella
+  plugin della release LabRecorder 1.17).
+- Nota: il fix `@dataclass` su `DeviceHealth` (commit 8be4fd5) è incluso a monte.
+
+**Post-4.1 (turno precedente):**
 - Fix: `timer.stop()` in try/finally nel dialog BLE picker (era una potenziale crash su cancel)
 - Riordino UI: tasto "🔍 Scan nearby BLE" SOPRA il campo MAC nel dialog Add Device, nascosto per EmotiBit
 - Correzione: niente "LED blinking" — Polar H10 non ha LED, si attiva solo se indossato sul petto con elettrodi inumiditi
@@ -289,15 +301,22 @@ lavorare a BiHome, leggi nell'ordine:
 
 ---
 
-## 12. Stato corrente al 2026-05-26
+## 12. Stato corrente al 2026-06-09
 
-- Exe buildato: `dist/BiHome Wearable/BiHome Wearable.exe` (13:08)
-- Shortcut desktop creato (punta al .bat per bypass Smart App Control)
-- HTI.md creato
-- Tutti i fix Sprint 4.1 + post-4.1 applicati
-- Vittorio ha Smart App Control attivo sulla sua macchina → usa il .bat
-- Prossimo step: test in locale del flow completo (wizard → 2 Polar +
-  2 EmotiBit → REC → STOP → verifica XDF), poi test su seconda macchina
+- **Seconda macchina** configurata per girare da sorgente (no Anaconda qui):
+  repo in `C:\Users\vitto\Downloads\BiHome_wearable`, virtualenv `.venv` su
+  **Python 3.13** (il python di sistema è 3.8, EOL, da non usare). Interprete:
+  `.venv\Scripts\python.exe`. Deps: pyqt5 5.15.11, pylsl 1.18.2, bleak 3.0.2,
+  brainflow 5.22.2, numpy 2.4.6, pyqtgraph 0.14.0.
+- `bleak 3.0.2` verificato compatibile con l'uso nel codice (nessun pin/modifica).
+- `LabRecorderCLI.exe` + DLL scaricati in `LabRecorder/` dalla release v1.17.1
+  (binari gitignored). Registrazione XDF abilitata.
+- Launcher locale `Avvia BiHome (venv).bat` (gitignored) che usa il venv.
+- Fix zombie-killer applicato e **verificato**: l'app da sorgente parte, supera
+  il killer senza auto-terminarsi e raggiunge il wizard. Demo con solo Polar OK.
+- Prossimo step: test del flow completo (wizard → Polar [+ EmotiBit] → REC →
+  STOP → verifica XDF). Per EmotiBit serve la regola firewall UDP 3131
+  (`install_firewall_rule.bat`, admin) — non ancora applicata su questa macchina.
 
 **Per Claude**: se Vittorio chiede di continuare il lavoro, chiedi
 prima cosa vuole fare. Non assumere che il lavoro pendente debba essere

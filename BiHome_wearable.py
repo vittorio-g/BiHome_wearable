@@ -4153,26 +4153,48 @@ def _kill_zombie_python_instances():
     my_pid = os.getpid()
     try:
         import subprocess as _sp
-        # List all python processes with start time
+        # List all python processes with their parent so we can protect the
+        # whole current process tree (see below).
         out = _sp.run(
             ["wmic", "process", "where", "name='python.exe'",
-             "get", "ProcessId,CommandLine", "/format:csv"],
+             "get", "ProcessId,ParentProcessId,CommandLine", "/format:csv"],
             capture_output=True, text=True, timeout=5)
-        zombies = []
+        # Parse every python.exe row once: (pid, cmdline) + a pid->ppid map.
+        rows = []
+        ppid_of = {}
         for line in out.stdout.splitlines():
             line = line.strip()
             if not line or "Node" in line:
                 continue
-            # csv format: Node,CommandLine,ProcessId
+            # csv columns are alphabetical: Node,CommandLine,ParentProcessId,ProcessId
             parts = line.split(',')
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
             cmdline = parts[1] or ""
             try:
                 pid = int(parts[-1])
+                ppid = int(parts[-2])
             except Exception:
                 continue
-            if pid == my_pid:
+            rows.append((pid, cmdline))
+            ppid_of[pid] = ppid
+        # Protect the current process AND its whole ancestor chain. When run
+        # from source via a venv, python.exe is a launcher shim that spawns the
+        # real interpreter as a child, so BOTH carry our command line — killing
+        # the parent shim would take us down with it. (Frozen .exe builds run as
+        # a single "BiHome Wearable.exe" process, so this is a no-op there.)
+        protected = set()
+        p = my_pid
+        for _ in range(16):  # cap the walk to guard against pid cycles
+            if p in protected:
+                break
+            protected.add(p)
+            p = ppid_of.get(p)
+            if not p:
+                break
+        zombies = []
+        for pid, cmdline in rows:
+            if pid in protected:
                 continue
             # Only kill if it's running OUR script
             if "BiHome_wearable" in cmdline or "lsl_viewer" in cmdline:

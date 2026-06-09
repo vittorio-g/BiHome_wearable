@@ -13,6 +13,13 @@ __pycache__/
 .env
 *.egg-info/
 
+# Per-machine virtualenv (run-from-source on machines without Anaconda)
+.venv/
+venv/
+
+# Machine-local launcher pointing at .venv (see "Avvia BiHome (da sorgente).bat" for the committed one)
+Avvia BiHome (venv).bat
+
 # Credenziali WiFi Arduino — mai in repo
 all_sensors/**/secrets.h
 
@@ -56,3 +63,4 @@ LabRecorder/networkinformation/
 LabRecorder/platforms/
 LabRecorder/styles/
 LabRecorder/tls/
+LabRecorder/generic/
