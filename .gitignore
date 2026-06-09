@@ -32,8 +32,19 @@ wizard_defaults.json
 build/
 dist/
 
-# Claude Code worktrees (ephemeral, not for version control)
-.claude/worktrees/
+# Claude Code state — per-user, per-machine. Whole .claude/ folder
+# is local: permissions, scheduled tasks, worktrees, settings.
+.claude/
+
+# PyInstaller .spec — regenerated each build, contains absolute paths
+BiHome Wearable.spec
+
+# Slide deck (large binary, iterated frequently — keep out of git history)
+BiHome_Wearable_HTI.pptx
+
+# Ad-hoc diagnostic logs at repo root
+*.log
+_scan_bf.log
 
 # LabRecorder binaries (too large for git, download separately)
 LabRecorder/*.exe

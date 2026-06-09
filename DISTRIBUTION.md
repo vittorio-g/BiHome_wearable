@@ -49,15 +49,46 @@ other apps, so try launching BiHome first.
 ## First launch
 
 1. **Double-click `BiHome Wearable.exe`**.
-2. Windows will probably show a SmartScreen warning:
-   > *"Windows protected your PC — Microsoft Defender SmartScreen prevented an
-   > unrecognized app from starting."*
+2. Windows will probably show a security warning. **Which warning depends
+   on your Windows configuration:**
 
-   This is normal for unsigned apps. To proceed:
+   **Case A — Standard SmartScreen** *(most users)*:
+   > *"Windows protected your PC — Microsoft Defender SmartScreen prevented
+   > an unrecognized app from starting."*
+
+   To proceed:
    - Click **"More info"**
    - Click **"Run anyway"**
 
    You only need to do this once per machine.
+
+   **Case B — Smart App Control** *(Windows 11 with stricter settings)*:
+   > *"Smart App Control blocked an app that might be unsafe."*
+   > *"Controllo intelligente delle app ha bloccato un'app che potrebbe non
+   > essere sicura."*
+
+   Distinguishing sign: clicking **"More info" / "Altre informazioni"**
+   opens a **web page** instead of revealing a "Run anyway" button. Smart
+   App Control has **no per-file bypass by design** — it blocks every
+   unsigned executable regardless of source.
+
+   You have three options:
+
+   - **Option 1 — Run from source (easiest, no system changes):**
+     Open the `BiHome_wearable/` source folder and double-click
+     **`Avvia BiHome (da sorgente).bat`**. It launches the same app
+     through Python (which is signed and trusted by Smart App Control).
+     Requires Python installed on the PATH (Anaconda recommended).
+
+   - **Option 2 — Disable Smart App Control** *(irreversible)*:
+     Windows Security → **App & browser control** → **Smart App Control
+     settings** → set to **Off**. ⚠️ **Once off, you cannot turn it back
+     on without resetting Windows**. This is intentional by Microsoft.
+
+   - **Option 3 — Code-signed build** *(long-term)*:
+     The BiHome team can ship a signed `.exe` once a code-signing
+     certificate is in place; ask the maintainer if your institution
+     requires this.
 
 3. The **setup wizard** opens:
    - **Step 1**: how many participants? (1 to 6)
@@ -85,22 +116,32 @@ The MAC is a 6-pair hex string like `24:AC:AC:04:96:A3`. Two easy ways
 to find it:
 
 **Option A — use the in-app BLE scanner (recommended):**
-1. Make sure your Polar H10 is **powered on** (LED blinking blue).
+1. **Put the Polar H10 on** — the strap must be worn on the chest with
+   the electrodes moistened. The Polar H10 has **no LED** and no power
+   button; it activates only when it detects skin contact. Just holding
+   it in your hand or laying it on a table is not enough.
 2. In the wizard, click **`+ Add device…`** → select **"Polar H10"**.
-3. Click **"🔍 Scan nearby BLE"** in that dialog.
+3. Click **"🔍 Scan nearby BLE"** in that dialog (it's right above the
+   MAC field).
 4. After ~6 s a list of nearby BLE devices appears.
 5. Find the line starting with **"Polar"** and click it — the MAC fills
    in automatically.
 6. Type a friendly name (e.g. *"Polar 1"*) and click Save.
 
 **Option B — via Windows Settings:**
-1. Open Windows **Settings → Bluetooth & devices → Devices**.
+1. Open Windows **Settings → Bluetooth & devices** (Win 11) or
+   **Settings → Devices → Bluetooth & other devices** (Win 10).
 2. If the Polar is not already paired, click **"Add device"** → Bluetooth,
    wait for "Polar H10 XXXXXX" to appear, click it to pair.
-3. Click on the paired Polar → **"Device details"** (or right-click →
-   **Properties**).
-4. Look for **"Bluetooth address"** — it's the 6-pair string.
+3. Find the paired Polar in the list, click the **`⋯`** menu (Win 11) or
+   the device row (Win 10), and choose **"Device details"** /
+   **"Properties"** / **"More options"**.
+4. Look for **"Bluetooth address"** (sometimes under an **"Advanced"** or
+   **"Hardware Ids"** subsection on Win 11) — it's the 6-pair hex string.
 5. Copy it and paste into the Add Device dialog.
+
+> If Windows 11 doesn't show the address in the Settings UI, fall back to
+> Option A (the in-app BLE scanner). It's faster anyway.
 
 > **Tip:** The 7-character ID printed on the inside of the Polar strap
 > (e.g. *0496A33F*) is **NOT** the MAC. The MAC is longer and uses
@@ -168,7 +209,7 @@ You can browse there via Windows Explorer to find recordings or to copy
 |---|---|---|
 | App won't launch | Missing VC++ Redistributable | Install link above |
 | SmartScreen blocks app | Unsigned executable | "More info" → "Run anyway" |
-| Polar not detected | Bluetooth off / device off / out of range | Toggle Bluetooth, verify Polar is on (LED) |
+| Polar not detected | Bluetooth off / Polar not worn / out of range | Toggle Bluetooth, **put the Polar on the chest** (no LED — it activates only when worn) |
 | Polar shows "unreachable" after retries | Already connected elsewhere | Close Polar Beat app or other paired apps |
 | EmotiBit not detected | Firewall blocks Python on UDP 3131 | First scan will fall back to BrainFlow (~15 s) — wait |
 | EmotiBit not detected (after retry) | Not on same WiFi as PC | Verify network in EmotiBit's WiFi config |

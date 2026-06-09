@@ -2,6 +2,15 @@
 
 A multi-device physiological and motion data acquisition system for experimental research. Integrates heterogeneous wearable sensors, synchronizes them with sub-millisecond precision, and publishes real-time data streams via **Lab Streaming Layer (LSL)** for live monitoring and lossless recording in `.xdf` format.
 
+## Documentation map
+
+| File | Audience | Purpose |
+|---|---|---|
+| `README.md` | developers | Architecture, setup from source, signal processing details |
+| `DISTRIBUTION.md` | end users | Running the bundled `.exe`, SmartScreen / Smart App Control workarounds, finding device addresses |
+| `HTI.md` | reviewers / academic | Human-technology interaction analysis: usability for psychology researchers |
+| `CHAT_CONTEXT.md` | future Claude sessions | Single-paste primer to bring a fresh chat (any device) up to speed on project state |
+
 ---
 
 ## Scientific Purpose

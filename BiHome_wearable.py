@@ -3377,7 +3377,9 @@ def _pick_ble_device_dialog(parent=None):
 
     hint = Qw.QLabel(
         "Scanning… look for a row labelled <b>Polar H10</b> (or similar) "
-        "and click it to copy its MAC. Make sure the device is on (LED blinking).")
+        "and click it to copy its MAC. <b>The Polar H10 has no LED — it "
+        "powers on only when worn on the chest strap with the electrodes "
+        "moistened.</b> Put it on first, then retry the scan if needed.")
     hint.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
     hint.setWordWrap(True)
     lay.addWidget(hint)
@@ -3481,7 +3483,17 @@ def _pick_ble_device_dialog(parent=None):
 
     timer = Qc.QTimer(); timer.timeout.connect(_poll); timer.start(200)
 
-    if d.exec_() != Qw.QDialog.Accepted:
+    try:
+        rc = d.exec_()
+    finally:
+        # Always stop the polling timer when the dialog closes — otherwise
+        # if the user cancels before the 6 s scan completes, the timer keeps
+        # firing into a dead dialog and could crash on destroyed widgets.
+        try:
+            timer.stop()
+        except Exception:
+            pass
+    if rc != Qw.QDialog.Accepted:
         return None
     item = listw.currentItem()
     if item is None:
@@ -3510,7 +3522,9 @@ def _add_device_dialog(parent=None) -> bool:
 
     d = Qw.QDialog(parent)
     d.setWindowTitle("BiHome — Add device")
-    d.setFixedSize(440, 290)
+    # Extra height accommodates the scan hint + button placed above the
+    # MAC/serial field (compared to the original 290px layout).
+    d.setFixedSize(440, 330)
     lay = Qw.QVBoxLayout(d); lay.setContentsMargins(20, 20, 20, 16); lay.setSpacing(10)
 
     title = Qw.QLabel("Add a new device")
@@ -3537,7 +3551,23 @@ def _add_device_dialog(parent=None) -> bool:
         f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
     lay.addWidget(name_edit)
 
-    # Address / serial
+    # "Scan nearby BLE" — placed ABOVE the MAC field so users see this
+    # option before thinking about manual entry. Only meaningful for
+    # Polar (type index 0); hidden when EmotiBit is selected.
+    scan_hint = Qw.QLabel("Don't know the MAC? Scan for it:")
+    scan_hint.setStyleSheet(f"color: {GRAY}; font-size: 11px;")
+    lay.addWidget(scan_hint)
+    scan_btn = Qw.QPushButton("🔍  Scan nearby BLE")
+    scan_btn.setStyleSheet(
+        f"QPushButton {{ background: transparent; color: {ACCENT}; "
+        f"border: 1px solid {ACCENT}; border-radius: 4px; "
+        f"padding: 5px 10px; font-size: 11px; }} "
+        f"QPushButton:hover {{ background: rgba(5,171,196,0.12); }} "
+        f"QPushButton:disabled {{ color: {GRAY}; border-color: {BORDER}; }}")
+    lay.addWidget(scan_btn)
+
+    # Address / serial — below the scan button so the scan is the obvious
+    # first choice for end-users who don't already know the MAC.
     addr_lbl = Qw.QLabel("MAC address (XX:XX:XX:XX:XX:XX):")
     lay.addWidget(addr_lbl)
     addr_edit = Qw.QLineEdit()
@@ -3547,17 +3577,6 @@ def _add_device_dialog(parent=None) -> bool:
         f"border: 1px solid {BORDER}; border-radius: 4px; padding: 5px; }}")
     lay.addWidget(addr_edit)
 
-    # "Scan nearby BLE" — only meaningful for Polar (type index 0).
-    # Lists every BLE device around, the user clicks the row that looks
-    # like their Polar and the MAC is auto-filled. No more hunting in
-    # Windows Bluetooth settings.
-    scan_btn = Qw.QPushButton("🔍  Scan nearby BLE")
-    scan_btn.setStyleSheet(
-        f"QPushButton {{ background: transparent; color: {ACCENT}; "
-        f"border: 1px solid {ACCENT}; border-radius: 4px; "
-        f"padding: 5px 10px; font-size: 11px; }} "
-        f"QPushButton:hover {{ background: rgba(5,171,196,0.12); }} "
-        f"QPushButton:disabled {{ color: {GRAY}; border-color: {BORDER}; }}")
     def _on_scan_ble():
         picked = _pick_ble_device_dialog(d)
         if picked:
@@ -3566,21 +3585,23 @@ def _add_device_dialog(parent=None) -> bool:
                 name_edit.setText(picked_name)
             addr_edit.setText(picked_addr)
     scan_btn.clicked.connect(_on_scan_ble)
-    lay.addWidget(scan_btn)
 
     def _on_type_change():
         if type_combo.currentIndex() == 0:
             addr_lbl.setText("MAC address (XX:XX:XX:XX:XX:XX):")
             addr_edit.setPlaceholderText("24:AC:AC:04:96:A3")
-            scan_btn.setEnabled(True)
+            scan_hint.setVisible(True)
+            scan_btn.setVisible(True)
             scan_btn.setToolTip("Discover nearby Bluetooth devices and pick yours")
         else:
             addr_lbl.setText("EmotiBit serial number (MD-V6-XXXXXXX):")
             addr_edit.setPlaceholderText("MD-V6-0000482")
-            scan_btn.setEnabled(False)
-            scan_btn.setToolTip("EmotiBit uses WiFi — read the serial from the device label")
+            # Hide the BLE scan UI entirely for EmotiBit — it uses WiFi,
+            # the serial is printed on the device label.
+            scan_hint.setVisible(False)
+            scan_btn.setVisible(False)
     type_combo.currentIndexChanged.connect(_on_type_change)
-    _on_type_change()  # initialise tooltip / enabled state
+    _on_type_change()  # initialise visibility
 
     # Buttons
     btns = Qw.QHBoxLayout(); btns.addStretch()
