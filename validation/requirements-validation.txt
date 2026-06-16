@@ -1,0 +1,17 @@
+# Dependencies for the BiHome validation pipeline (offline analysis + mocks).
+# Kept SEPARATE from the acquisition app so they never enter the PyInstaller
+# build (the .exe must stay lean; matplotlib in particular is excluded there).
+#
+# Install into the run-from-source venv:
+#   .venv\Scripts\python.exe -m pip install -r validation/requirements-validation.txt
+
+pylsl
+numpy
+scipy
+pandas
+matplotlib
+pyxdf
+
+# Signal-specific processing (ECG R-peaks / HRV, EDA tonic-phasic / SCR).
+# Heavier; pulled in for the signal-specific agreement sprint.
+neurokit2
