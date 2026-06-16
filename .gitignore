@@ -17,6 +17,9 @@ __pycache__/
 .venv/
 venv/
 
+# Validation: generated stream inventory (per-run, machine-specific)
+validation/stream_inventory.json
+
 # Machine-local launcher pointing at .venv (see "Avvia BiHome (da sorgente).bat" for the committed one)
 Avvia BiHome (venv).bat
 
