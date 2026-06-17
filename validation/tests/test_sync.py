@@ -59,6 +59,20 @@ def test_detect_pulses_flat_signal():
     assert sync.detect_pulses(np.ones(1000), 1000.0).size == 0
 
 
+def test_rising_edge_times():
+    fs, dur = 100.0, 12.0
+    ts = np.arange(0, dur, 1 / fs) + 1000.0   # absolute-ish LSL timestamps
+    v = np.zeros_like(ts)
+    starts = [2.0, 5.0, 9.0]
+    for s in starts:
+        i0 = int(s * fs)
+        v[i0:i0 + int(0.1 * fs)] = 1          # 100 ms HIGH
+    edges = sync.rising_edge_times(ts, v)
+    assert edges.size == 3
+    expected = np.array([1000.0 + s for s in starts])
+    assert np.max(np.abs(np.sort(edges) - expected)) < 2.0 / fs
+
+
 def test_match_pulses_count_mismatch_raises():
     try:
         sync.match_pulses(np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0]))

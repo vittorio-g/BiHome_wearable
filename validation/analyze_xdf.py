@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agreement as ag  # noqa: E402
 import signal_specific as ss  # noqa: E402
 import acq_sync as acqs  # noqa: E402
+import sync  # noqa: E402
 
 import matplotlib
 matplotlib.use("Agg")  # headless: save PNGs, never open a window
@@ -235,7 +236,13 @@ def main():
             print(f"ERROR: XDF marker stream {args.xdf_trigger!r} not found "
                   f"(streams: {', '.join(streams)})", file=sys.stderr)
             return 1
-        marker_times = streams[args.xdf_trigger]["time_stamps"]
+        trig_stream = streams[args.xdf_trigger]
+        trig_ts = np.asarray(trig_stream["time_stamps"], dtype=float)
+        trig_vals = np.asarray(trig_stream["time_series"], dtype=float)
+        if trig_vals.ndim > 1:
+            trig_vals = trig_vals[:, 0]
+        marker_times = sync.rising_edge_times(trig_ts, trig_vals)
+        print(f"XDF trigger '{args.xdf_trigger}': {marker_times.size} rising edge(s)")
         trig = args.acq_trigger
         try:
             trig = int(trig)

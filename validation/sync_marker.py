@@ -29,11 +29,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ttl_trigger  # noqa: E402
 
 
-def _make_marker_outlet(name: str):
-    info = pylsl.StreamInfo(name, "Markers", 1, pylsl.IRREGULAR_RATE,
-                            pylsl.cf_int32, "bihome_ttl_sync")
+def _make_trigger_outlet(name: str, rate: float):
+    # Continuous regular-rate 0/1 digital channel: visible as a square wave in
+    # the viewer (0 at rest, 1 during a pulse) and edge-detectable offline,
+    # symmetric with the BIOPAC .acq TTL channel.
+    info = pylsl.StreamInfo(name, "Digital", 1, rate, pylsl.cf_int32, "bihome_ttl_sync")
     info.desc().append_child("channels").append_child("channel") \
-        .append_child_value("label", "TTLsync")
+        .append_child_value("label", "TTL")
     return pylsl.StreamOutlet(info)
 
 
@@ -45,15 +47,18 @@ def main():
     ap.add_argument("--width-ms", type=float, default=50.0, help="TTL pulse width")
     ap.add_argument("--pulses", type=int, default=2, help="number of sync pulses to fire")
     ap.add_argument("--interval", type=float, default=5.0, help="seconds between pulses")
-    ap.add_argument("--marker-name", default="BiHomeSync", help="LSL marker stream name")
+    ap.add_argument("--rate", type=float, default=100.0, help="continuous stream sample rate (Hz)")
+    ap.add_argument("--marker-name", default="BiHomeSync", help="LSL trigger stream name")
     ap.add_argument("--no-ttl", action="store_true", help="marker-only (no serial hardware)")
     ap.add_argument("--no-init", action="store_true", help='skip the "RR" init on the TTL module')
     args = ap.parse_args()
 
     value = ttl_trigger.parse_value(args.value)
+    width_s = max(0.0, args.width_ms) / 1000.0
 
-    outlet = _make_marker_outlet(args.marker_name)
-    print(f"LSL marker outlet '{args.marker_name}' (int32) up. Value={value} (0x{value:02X}).")
+    outlet = _make_trigger_outlet(args.marker_name, args.rate)
+    print(f"LSL continuous trigger '{args.marker_name}' @ {args.rate:.0f} Hz up. "
+          f"TTL value={value} (0x{value:02X}).")
     time.sleep(1.0)  # let consumers (BiHome viewer / LabRecorder) subscribe
 
     ttl = None
@@ -70,24 +75,43 @@ def main():
             print(f"ERROR opening TTL port {args.port}: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
 
+    # Continuous push: 0 at rest, 1 during each pulse window. The TTL line is
+    # driven HIGH/LOW on the same transitions, so the LSL square wave and the
+    # BIOPAC TTL are the same signal.
+    period = 1.0 / args.rate
+    t0 = pylsl.local_clock() + 1.0
+    pulse_starts = [t0 + k * args.interval for k in range(args.pulses)]
+    end_t = pulse_starts[-1] + width_s + 0.5
+    next_t = pylsl.local_clock()
+    prev = 0
+    fired = 0
     try:
-        for i in range(args.pulses):
-            t = pylsl.local_clock()
-            outlet.push_sample([value], timestamp=t)   # LSL marker
-            if ttl is not None:
-                ttl.pulse(value, args.width_ms)         # TTL pulse to BIOPAC
-            print(f"  pulse {i + 1}/{args.pulses}  value={value} (0x{value:02X})  "
-                  f"lsl_t={t:.3f}{'  [marker-only]' if ttl is None else ''}")
-            if i < args.pulses - 1:
-                time.sleep(args.interval)
+        while pylsl.local_clock() < end_t:
+            now = pylsl.local_clock()
+            if now >= next_t:
+                hi = any(ps <= now < ps + width_s for ps in pulse_starts)
+                val = 1 if hi else 0
+                outlet.push_sample([val], timestamp=now)
+                if val != prev:
+                    if ttl is not None:
+                        ttl.send_value(value) if val else ttl.reset()
+                    if val:
+                        fired += 1
+                        print(f"  pulse {fired}/{args.pulses}  lsl_t={now:.3f}"
+                              f"{'  [marker-only]' if ttl is None else ''}")
+                    prev = val
+                next_t += period
+                if next_t < now:           # fell behind: resync
+                    next_t = now + period
+            time.sleep(period / 4.0)
     except KeyboardInterrupt:
         print("\ninterrupted")
     finally:
         if ttl is not None:
             ttl.close()
             print("TTL port reset + closed.")
-    print("Done. Make sure the BiHome recording captured the marker stream and "
-          "the .acq captured the TTL pulses.")
+    print("Done. The continuous 0/1 trigger stream and the TTL pulses are aligned; "
+          "make sure BiHome recorded the stream and the .acq captured the pulses.")
     return 0
 
 

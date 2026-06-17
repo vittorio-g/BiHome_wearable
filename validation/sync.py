@@ -56,6 +56,30 @@ def detect_pulses(signal: np.ndarray, fs: float, threshold: float = None,
     return times
 
 
+def rising_edge_times(timestamps: np.ndarray, values: np.ndarray,
+                      threshold: float = 0.5, min_interval_s: float = 0.5) -> np.ndarray:
+    """Rising-edge times of a non-uniformly-sampled 0/1 channel, using its own
+    per-sample timestamps (for the XDF trigger stream, which carries explicit
+    LSL timestamps rather than a fixed rate). Returns the timestamp of each
+    sample where the value crosses `threshold` upward."""
+    ts = np.asarray(timestamps, dtype=float).ravel()
+    v = np.asarray(values, dtype=float).ravel()
+    n = min(ts.size, v.size)
+    ts, v = ts[:n], v[:n]
+    if n < 2:
+        return np.array([])
+    high = v > threshold
+    idx = np.where((~high[:-1]) & (high[1:]))[0] + 1
+    times = ts[idx]
+    if times.size and min_interval_s > 0:
+        keep = [times[0]]
+        for t in times[1:]:
+            if t - keep[-1] >= min_interval_s:
+                keep.append(t)
+        times = np.array(keep)
+    return times
+
+
 def fit_clock_map(t_ref: np.ndarray, t_target: np.ndarray) -> Tuple[float, float, float, int]:
     """Fit t_ref ≈ slope * t_target + intercept (least squares).
 
