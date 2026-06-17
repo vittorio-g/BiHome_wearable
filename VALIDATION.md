@@ -154,5 +154,13 @@ HR-over-time for ECG and tonic/phasic for EDA).
   not the target — derived HR/HRV and R-peak agreement are.
 - **Lag**: a constant offset is estimated and removed; the value is reported. A
   *drifting* offset is not corrected (LSL clock sync should keep it small).
-- **Live agreement monitor** in the viewer (rolling correlation/bias per pair)
-  is **not yet implemented** — currently agreement is offline only.
+- **Live agreement monitor**: `live_monitor.py` (standalone console) prints a
+  rolling-window readout per pair — latest values, rolling Pearson r (with an
+  in-window timing-offset correction so ECG is meaningful) and bias:
+  ```powershell
+  .\.venv\Scripts\python.exe validation\live_monitor.py --window 10
+  ```
+  It is a sanity monitor ("are the devices tracking now?"), not a replacement
+  for the offline report. It is intentionally separate from the BiHome viewer
+  (no acquisition-app change). An *embedded* monitor inside the viewer is a
+  possible future addition.
