@@ -21,6 +21,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agreement as ag  # noqa: E402
 import signal_specific as ss  # noqa: E402
+import acq_sync as acqs  # noqa: E402
 
 import matplotlib
 matplotlib.use("Agg")  # headless: save PNGs, never open a window
@@ -201,6 +202,15 @@ def main():
     ap.add_argument("--out", default=None, help="output dir (default: validation/reports/<stem>)")
     ap.add_argument("--no-lag-correct", dest="lag_correct", action="store_false",
                     help="do NOT remove the estimated timing offset before amplitude metrics")
+    # TTL-sync path: pull the reference (BIOPAC) signals from a separate .acq
+    # recording, aligned to this XDF via a shared trigger.
+    ap.add_argument("--acq", default=None, help="BIOPAC .acq file to align via TTL")
+    ap.add_argument("--acq-trigger", default=None,
+                    help="trigger channel in the .acq (name or integer index)")
+    ap.add_argument("--xdf-trigger", default=None,
+                    help="name of the LSL marker stream in the XDF carrying the TTL events")
+    ap.add_argument("--acq-threshold", type=float, default=None,
+                    help="TTL high/low threshold for pulse detection (default: auto)")
     args = ap.parse_args()
 
     if not os.path.isfile(args.xdf):
@@ -214,6 +224,34 @@ def main():
 
     streams = _load_streams_by_name(args.xdf)
     print(f"Loaded {len(streams)} streams: {', '.join(streams)}")
+
+    # Optional: align a BIOPAC .acq recording onto this XDF's LSL timeline via a
+    # shared TTL trigger, then treat its channels as a normal "BIOPAC" stream.
+    if args.acq:
+        if not args.acq_trigger or not args.xdf_trigger:
+            print("ERROR: --acq requires --acq-trigger and --xdf-trigger", file=sys.stderr)
+            return 1
+        if args.xdf_trigger not in streams:
+            print(f"ERROR: XDF marker stream {args.xdf_trigger!r} not found "
+                  f"(streams: {', '.join(streams)})", file=sys.stderr)
+            return 1
+        marker_times = streams[args.xdf_trigger]["time_stamps"]
+        trig = args.acq_trigger
+        try:
+            trig = int(trig)
+        except ValueError:
+            pass
+        try:
+            diag = acqs.inject_biopac_from_acq(
+                streams, marker_times, args.acq, trig,
+                threshold=args.acq_threshold)
+        except Exception as e:
+            print(f"ERROR aligning .acq: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        print(f"TTL-aligned BIOPAC .acq: {diag['n_pulses']} pulse(s), "
+              f"slope={diag['slope']:.6f}, offset={diag['intercept']:.3f}s, "
+              f"max_residual={diag['max_resid_s'] * 1000:.1f}ms, "
+              f"channels={diag['channels']}")
 
     results = {}
     for pair in cmap["pairs"]:

@@ -61,6 +61,35 @@ cd C:\Users\vitto\Downloads\BiHome_wearable
 
 ---
 
+## 3b. Two-PC setup with BIOPAC MP160 (TTL sync) — the real path
+
+BIOPAC's AcqKnowledge **LSL license does not export** its own acquired data
+(it only *ingests* other LSL devices). So the MP160 is recorded on its own PC
+in AcqKnowledge (`.acq`) and aligned to the BiHome XDF **offline via a shared
+TTL trigger**:
+
+- A LabJack / trigger box turns each TTL edge into an **LSL marker** on the
+  BiHome PC (captured in the XDF marker stream).
+- The same TTL is recorded on a **BIOPAC channel** in the `.acq`.
+- Send **≥2 pulses** (e.g. at start and end) so the analysis can fit both the
+  clock offset *and* drift between the two PCs.
+
+Then align + analyse in one command:
+
+```powershell
+.\.venv\Scripts\python.exe validation\analyze_xdf.py session.xdf `
+    --acq biopac.acq --acq-trigger "Digital input" --xdf-trigger "TriggerMarkers"
+```
+
+`analyze_xdf` detects the TTL pulses in the `.acq`, reads the XDF marker
+timestamps, fits `LSL ≈ slope·acq + offset` (`validation/sync.py`), remaps the
+BIOPAC channels onto the LSL timeline (`validation/acq_sync.py`), and then runs
+the normal agreement analysis. It prints the fit (slope/offset) and the
+**max residual** across pulses — a sync-quality check (should be a few ms).
+
+Point `channel_map.json`'s `reference.stream` at `"BIOPAC"` and each
+`reference.channel` at the real `.acq` channel name.
+
 ## 4. Developing/Testing without hardware (mocks)
 
 ```powershell
