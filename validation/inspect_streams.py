@@ -150,7 +150,7 @@ def main():
         inventory.append(entry)
 
         tag = "BiHome" if entry["is_bihome"] else "*** CANDIDATE REFERENCE (BIOPAC?) ***"
-        print(f"── {name}  [{tag}]")
+        print(f"-- {name}  [{tag}]")
         print(f"     type={entry['type']!r}  channels={entry['channel_count']}  "
               f"nominal_srate={entry['nominal_srate']}  fmt={entry['channel_format']}")
         print(f"     source_id={entry['source_id']!r}  host={entry['hostname']!r}")

@@ -66,29 +66,43 @@ cd C:\Users\vitto\Downloads\BiHome_wearable
 BIOPAC's AcqKnowledge **LSL license does not export** its own acquired data
 (it only *ingests* other LSL devices). So the MP160 is recorded on its own PC
 in AcqKnowledge (`.acq`) and aligned to the BiHome XDF **offline via a shared
-TTL trigger**:
+TTL trigger**.
 
-- A LabJack / trigger box turns each TTL edge into an **LSL marker** on the
-  BiHome PC (captured in the XDF marker stream).
-- The same TTL is recorded on a **BIOPAC channel** in the `.acq`.
-- Send **≥2 pulses** (e.g. at start and end) so the analysis can fit both the
-  clock offset *and* drift between the two PCs.
+**Hardware chain** (from the working technician setup):
+```
+BiHome PC --USB-TTL (COMx, 115200 8N1)--> STP100D --> MP160 digital D8-D15 --> AcqKnowledge .acq
+```
+The STP100D speaks the same serial protocol as the BBTK USB-TTL module:
+2-char UPPERCASE hex pairs, `"RR"` init, `"01".."FF"` set lines (LATCH), `"00"`
+reset. `validation/ttl_trigger.py` implements it headless.
 
-Then align + analyse in one command:
+**Fire synchronized events** with `validation/sync_marker.py` on the BiHome PC,
+*during* the recording — each fire emits an **LSL marker** (into the XDF) AND a
+**TTL pulse** (into the .acq) at the same instant. Fire ≥2 (e.g. start and end)
+so the analysis fits both clock **offset and drift**:
 
 ```powershell
-.\.venv\Scripts\python.exe validation\analyze_xdf.py session.xdf `
-    --acq biopac.acq --acq-trigger "Digital input" --xdf-trigger "TriggerMarkers"
+.\.venv\Scripts\python.exe validation\sync_marker.py --port COM3 --pulses 3 --interval 5
+# (omit --port / add --no-ttl for a marker-only dry run)
 ```
 
-`analyze_xdf` detects the TTL pulses in the `.acq`, reads the XDF marker
+This creates an LSL marker stream named **`BiHomeSync`** (recorded by the BiHome
+viewer like any stream) and drives D8-D15 on the MP160.
+
+**Then align + analyse** in one command:
+```powershell
+.\.venv\Scripts\python.exe validation\analyze_xdf.py session.xdf `
+    --acq biopac.acq --acq-trigger "<D8-D15 channel name>" --xdf-trigger BiHomeSync
+```
+`analyze_xdf` detects the TTL pulses in the `.acq`, reads the `BiHomeSync` marker
 timestamps, fits `LSL ≈ slope·acq + offset` (`validation/sync.py`), remaps the
-BIOPAC channels onto the LSL timeline (`validation/acq_sync.py`), and then runs
-the normal agreement analysis. It prints the fit (slope/offset) and the
-**max residual** across pulses — a sync-quality check (should be a few ms).
+BIOPAC channels onto the LSL timeline (`validation/acq_sync.py`), and runs the
+normal agreement analysis. It prints the fit (slope/offset) and the **max
+residual** across pulses — a sync-quality check (should be a few ms).
 
 Point `channel_map.json`'s `reference.stream` at `"BIOPAC"` and each
-`reference.channel` at the real `.acq` channel name.
+`reference.channel` at the real `.acq` channel name (check it with the .acq, or
+with the digital channels D8-D15 enabled in AcqKnowledge).
 
 ## 4. Developing/Testing without hardware (mocks)
 
