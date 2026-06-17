@@ -18,3 +18,6 @@ neurokit2
 
 # Reading BIOPAC AcqKnowledge .acq files (offline TTL-sync path).
 bioread
+
+# Serial control of the USB-TTL / STP100D module (sending TTL triggers).
+pyserial
