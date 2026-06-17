@@ -20,6 +20,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agreement as ag  # noqa: E402
+import signal_specific as ss  # noqa: E402
 
 import matplotlib
 matplotlib.use("Agg")  # headless: save PNGs, never open a window
@@ -162,10 +163,18 @@ def _write_html(results, xdf_path, out_dir):
             for k in _METRIC_ORDER)
         rows += f"<tr><th>{name}</th>{cells}</tr>\n"
     figs = ""
-    for name, r in results.items():
-        p = r["plots"]
+    for name, res in results.items():
+        p = res["plots"]
         figs += f"<h2>{name}</h2>\n<img src='{p['timeseries']}'><br>" \
                 f"<img src='{p['scatter']}'><img src='{p['bland_altman']}'>\n"
+        for fn in (res.get("extra_plots") or {}).values():
+            figs += f"<br><img src='{fn}'>\n"
+        ex = res.get("extra") or {}
+        if ex:
+            er = "".join(
+                f"<tr><th>{k}</th><td>{(f'{v:.4g}' if isinstance(v, float) else v)}</td></tr>"
+                for k, v in ex.items())
+            figs += f"<h3>{name} — signal-specific</h3><table>{er}</table>\n"
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>BiHome validation report</title>
 <style>body{{font-family:system-ui,Arial;margin:24px;color:#1c1c1c}}
@@ -226,17 +235,27 @@ def main():
         metrics = ag.compute_all(w, r, fs=None)
         metrics["lag_s"] = lag  # estimated offset (removed before amplitude metrics)
         plots = _plot_pair(name, grid, w, r, metrics, out_dir)
-        results[name] = {"metrics": metrics, "plots": plots}
+        extra, extra_plots = ss.run_for_kind(pair.get("kind"), w, r, fs, out_dir, name)
+        results[name] = {"metrics": metrics, "plots": plots,
+                         "extra": extra, "extra_plots": extra_plots}
         print(f"  {name:5s}  n={metrics['n']:6d}  r={metrics['pearson_r']:.3f}  "
               f"CCC={metrics['ccc']:.3f}  ICC={metrics['icc_2_1']:.3f}  "
               f"bias={metrics['bias']:.4g}  lag={metrics.get('lag_s', float('nan')):.3f}s")
+        sk = [k for k in ("hr_pearson_r", "hr_bias", "beat_f1", "beat_abs_err_ms",
+                          "scl_pearson_r", "scl_ccc", "scr_f1",
+                          "scr_count_wear", "scr_count_ref") if k in extra]
+        if sk:
+            print("         " + "  ".join(
+                (f"{k}={extra[k]:.4g}" if isinstance(extra[k], float) else f"{k}={extra[k]}")
+                for k in sk))
 
     if not results:
         print("No pairs analysed (check channel_map vs streams in the XDF).")
         return 1
 
     with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump({k: v["metrics"] for k, v in results.items()}, f, indent=2)
+        json.dump({k: {**v["metrics"], **v.get("extra", {})} for k, v in results.items()},
+                  f, indent=2)
     # CSV
     with open(os.path.join(out_dir, "metrics.csv"), "w", encoding="utf-8") as f:
         f.write("pair," + ",".join(_METRIC_ORDER) + "\n")

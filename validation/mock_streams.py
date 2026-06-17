@@ -43,11 +43,34 @@ from pylsl import StreamInfo, StreamOutlet, local_clock, cf_float32
 
 # ── Synthetic signal "truth" functions (all take absolute time t in seconds) ──
 
-def ecg_truth(t: float, hr_bpm: float = 70.0) -> float:
+# Heart-rate model: mean + slow drift + respiratory sinus arrhythmia (RSA), so
+# the instantaneous HR genuinely varies and HR / HRV agreement is meaningful to
+# verify (a fixed HR would make HR correlation pure noise).
+_HR0 = 70.0
+_HR_MOD = [(8.0, 0.05), (4.0, 0.25)]  # (amplitude bpm, frequency Hz)
+
+
+def hr_bpm(t: float) -> float:
+    """Instantaneous heart rate (bpm) as a function of time."""
+    v = _HR0
+    for a, f in _HR_MOD:
+        v += a * math.sin(2 * math.pi * f * t)
+    return v
+
+
+def cardiac_phase(t: float) -> float:
+    """Cumulative cardiac cycles since t=0 — the analytic integral of
+    hr(t)/60 — so ECG and PPG stay phase-consistent as the HR changes."""
+    phase = _HR0 * t / 60.0
+    for a, f in _HR_MOD:
+        phase += (-a / (2 * math.pi * f) * (math.cos(2 * math.pi * f * t) - 1.0)) / 60.0
+    return phase
+
+
+def ecg_truth(t: float) -> float:
     """A simple synthetic ECG beat: P, QRS and T waves as Gaussians over the
     cardiac phase. Dimensionless, roughly in [-0.3, 1.0]. Deterministic in t."""
-    period = 60.0 / hr_bpm
-    phase = (t % period) / period  # 0..1 within a beat
+    phase = cardiac_phase(t) % 1.0  # 0..1 within the current beat
     # (center, amplitude, width) for P, Q, R, S, T
     waves = [
         (0.16, 0.10, 0.025),   # P
@@ -74,11 +97,11 @@ def eda_truth(t: float) -> float:
     return tonic + scr
 
 
-def ppg_truth(t: float, hr_bpm: float = 70.0) -> float:
-    """PPG (a.u.): pulsatile waveform at the heart rate + dicrotic notch."""
-    f = hr_bpm / 60.0
-    return (math.sin(2 * math.pi * f * t)
-            + 0.35 * math.sin(4 * math.pi * f * t + 0.6))
+def ppg_truth(t: float) -> float:
+    """PPG (a.u.): pulsatile waveform at the heart rate + dicrotic notch.
+    Shares cardiac_phase() with the ECG so PPG and ECG agree on rate."""
+    ph = 2 * math.pi * cardiac_phase(t)
+    return math.sin(ph) + 0.35 * math.sin(2 * ph + 0.6)
 
 
 def resp_truth(t: float, rr_bpm: float = 15.0) -> float:
