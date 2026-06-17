@@ -45,7 +45,8 @@ def main():
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--value", default="01", help="trigger value: int 0-255 or hex (e.g. 01, FF)")
     ap.add_argument("--width-ms", type=float, default=50.0, help="TTL pulse width")
-    ap.add_argument("--pulses", type=int, default=2, help="number of sync pulses to fire")
+    ap.add_argument("--pulses", type=int, default=2,
+                    help="number of sync pulses to fire (0 = run forever until stopped)")
     ap.add_argument("--interval", type=float, default=5.0, help="seconds between pulses")
     ap.add_argument("--rate", type=float, default=100.0, help="continuous stream sample rate (Hz)")
     ap.add_argument("--marker-name", default="BiHomeSync", help="LSL trigger stream name")
@@ -80,24 +81,33 @@ def main():
     # BIOPAC TTL are the same signal.
     period = 1.0 / args.rate
     t0 = pylsl.local_clock() + 1.0
-    pulse_starts = [t0 + k * args.interval for k in range(args.pulses)]
-    end_t = pulse_starts[-1] + width_s + 0.5
+    forever = args.pulses <= 0
+    last_k = None if forever else args.pulses - 1
+    end_t = None if forever else t0 + last_k * args.interval + width_s + 0.5
     next_t = pylsl.local_clock()
     prev = 0
     fired = 0
+    if forever:
+        print(f"Running until stopped (Ctrl-C): a pulse every {args.interval:.0f}s.")
     try:
-        while pylsl.local_clock() < end_t:
+        while end_t is None or pylsl.local_clock() < end_t:
             now = pylsl.local_clock()
             if now >= next_t:
-                hi = any(ps <= now < ps + width_s for ps in pulse_starts)
-                val = 1 if hi else 0
+                val = 0
+                if now >= t0:
+                    k = int((now - t0) // args.interval)   # current pulse index
+                    if forever or k <= last_k:
+                        ps = t0 + k * args.interval
+                        if ps <= now < ps + width_s:
+                            val = 1
                 outlet.push_sample([val], timestamp=now)
                 if val != prev:
                     if ttl is not None:
                         ttl.send_value(value) if val else ttl.reset()
                     if val:
                         fired += 1
-                        print(f"  pulse {fired}/{args.pulses}  lsl_t={now:.3f}"
+                        tag = "" if forever else f"/{args.pulses}"
+                        print(f"  pulse {fired}{tag}  lsl_t={now:.3f}"
                               f"{'  [marker-only]' if ttl is None else ''}")
                     prev = val
                 next_t += period
