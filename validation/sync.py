@@ -96,8 +96,20 @@ def fit_clock_map(t_ref: np.ndarray, t_target: np.ndarray) -> Tuple[float, float
     t_ref, t_target = t_ref[:n], t_target[:n]
     if n == 1:
         slope, intercept = 1.0, float(t_ref[0] - t_target[0])
-    else:
+    elif n == 2:
         slope, intercept = np.polyfit(t_target, t_ref, 1)
+    else:
+        # Theil-Sen: slope = median of pairwise slopes. Robust to a single pulse
+        # with anomalous serial-write latency (USB jitter), which would skew
+        # ordinary least squares — and hence the drift estimate.
+        slopes = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = t_target[j] - t_target[i]
+                if dx != 0:
+                    slopes.append((t_ref[j] - t_ref[i]) / dx)
+        slope = float(np.median(slopes))
+        intercept = float(np.median(t_ref - slope * t_target))
     resid = t_ref - (slope * t_target + intercept)
     max_resid = float(np.max(np.abs(resid))) if n else float("nan")
     return float(slope), float(intercept), max_resid, n

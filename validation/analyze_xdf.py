@@ -103,15 +103,28 @@ def _align_pair(w_stream, w_idx, r_stream, r_idx, scale_ref,
         fs = 0.0
     if fs <= 0:
         fs = (len(tw) - 1) / (tw[-1] - tw[0])
+    # Anti-alias the reference before downsampling onto the (lower) wearable
+    # grid: a high-rate reference (e.g. 1 kHz BIOPAC) decimated by plain
+    # interpolation would alias its sharp content (QRS) into the band of interest.
+    vr_aa = vr
+    try:
+        fs_r = (len(tr) - 1) / (tr[-1] - tr[0])
+        if fs_r > 1.3 * fs and len(vr) > 60:
+            from scipy.signal import butter, filtfilt
+            wn = min(0.99, 0.9 * fs / fs_r)        # cutoff ~0.45*fs vs ref Nyquist
+            b, a = butter(4, wn)
+            vr_aa = filtfilt(b, a, vr)
+    except Exception:
+        vr_aa = vr
     grid = np.arange(t0, t1, 1.0 / fs)
     w = np.interp(grid, tw, vw)
-    r = np.interp(grid, tr, vr) * float(scale_ref)
+    r = np.interp(grid, tr, vr_aa) * float(scale_ref)
     # Estimate the wearable-vs-reference timing offset and remove it so that
     # amplitude metrics are not dominated by a constant lag (critical for sharp
     # signals like ECG). The lag itself is reported as a metric.
     lag = ag.xcorr_lag(w, r, fs, max_lag_s=max_lag_s)
     if lag_correct and np.isfinite(lag):
-        r = np.interp(grid - lag, tr, vr) * float(scale_ref)
+        r = np.interp(grid - lag, tr, vr_aa) * float(scale_ref)
     return grid, w, r, fs, lag
 
 

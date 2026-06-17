@@ -33,6 +33,16 @@ def test_single_pulse_offset_only():
     assert abs(intercept - 12.34) < 1e-9
 
 
+def test_fit_robust_to_outlier_pulse():
+    t_acq = np.array([10.0, 70.0, 130.0, 190.0, 250.0])
+    slope_true, intercept_true = 1.0002, 8.0
+    t_lsl = slope_true * t_acq + intercept_true
+    t_lsl[2] += 0.030                       # one jittery pulse: +30 ms
+    slope, intercept, max_resid, n = sync.fit_clock_map(t_lsl, t_acq)
+    assert abs(slope - slope_true) < 5e-5   # robust slope ignores the outlier
+    assert max_resid > 0.005                # residual still exposes the bad pulse
+
+
 def test_map_times_round_trip():
     t_acq = np.linspace(0, 300, 50)
     t_lsl = 1.0002 * t_acq + 7.5

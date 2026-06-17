@@ -191,14 +191,22 @@ def eda_agreement(w: np.ndarray, r: np.ndarray, fs: float,
         metrics["note"] = "neurokit2 not installed"
         return metrics, plots
 
-    tw, phw, pkw, _ = _eda_decompose(w, fs)
-    tr, phr, pkr, _ = _eda_decompose(r, fs)
+    tw, phw, pkw, ampw = _eda_decompose(w, fs)
+    tr, phr, pkr, ampr = _eda_decompose(r, fs)
     if tw is not None and tr is not None:
         n = min(len(tw), len(tr))
         tonic_panel = ag.compute_all(tw[:n], tr[:n], fs=None)
         for k in ("pearson_r", "ccc", "icc_2_1", "rmse", "bias"):
             metrics[f"scl_{k}"] = tonic_panel[k]
     metrics.update(_event_match(pkw, pkr, fs))
+    # phasic SCR amplitude agreement (mean per device + absolute difference)
+    if ampw.size:
+        metrics["scr_amp_mean_wear"] = float(np.nanmean(ampw))
+    if ampr.size:
+        metrics["scr_amp_mean_ref"] = float(np.nanmean(ampr))
+    if ampw.size and ampr.size:
+        metrics["scr_amp_absdiff"] = abs(metrics["scr_amp_mean_wear"]
+                                         - metrics["scr_amp_mean_ref"])
 
     if out_dir is not None and tw is not None and tr is not None:
         import os
