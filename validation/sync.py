@@ -121,4 +121,19 @@ def match_pulses(a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
             f"same set of TTL pulses.")
     if a.size == 0:
         raise ValueError("no pulses detected on at least one side")
+    # With >=3 pulses the inter-pulse spacings on the two clocks must stay
+    # proportional (same drift). If they don't, the counts matched only by
+    # coincidence (e.g. a spurious edge on one side + a missing one on the
+    # other) and an in-order pairing would silently corrupt the clock fit.
+    if a.size >= 3:
+        da, db = np.diff(a), np.diff(b)
+        if np.any(da <= 0) or np.any(db <= 0):
+            raise ValueError("pulse times are not strictly increasing")
+        ratios = da / db
+        cv = float(np.std(ratios) / np.mean(ratios)) if np.mean(ratios) else 1.0
+        if cv > 0.05:
+            raise ValueError(
+                f"pulse spacings inconsistent between sides (CV={cv:.1%}) — likely a "
+                f"missing or spurious pulse. Inspect the trigger channel/threshold "
+                f"before trusting the alignment.")
     return a, b

@@ -104,6 +104,28 @@ Point `channel_map.json`'s `reference.stream` at `"BIOPAC"` and each
 `reference.channel` at the real `.acq` channel name (check it with the .acq, or
 with the digital channels D8-D15 enabled in AcqKnowledge).
 
+Useful `analyze_xdf.py` flags for real `.acq`: `--acq-polarity rising|falling`,
+`--acq-min-interval <s>`, `--acq-threshold <v>`, `--xdf-trigger-threshold <v>`,
+`--max-resid-ms <ms>`. The analysis prints loud `!! SYNC WARNING` lines if there
+are <3 pulses, the clock-fit residual is too large, or the slope is far from 1.0.
+
+### Pre-flight checklist (first real session)
+
+1. AcqKnowledge recording; digital channels **D8-D15 enabled**.
+2. Start `sync_marker.py` **before** pressing REC (BiHome records only streams it
+   already knows at REC, and freezes the REC checkboxes during recording).
+3. In BiHome confirm **`BiHomeSync` appears and is REC-checked**, then press REC.
+4. Fire **≥3 pulses** spread across start/middle/end (use `--pulses 0` to keep
+   firing every `--interval` s for the whole session).
+5. **Eyeball the first TTL pulse in AcqKnowledge** on the expected channel before
+   trusting the rest (the driver is write-only — it can't tell if the cable/STP100D
+   is actually delivering).
+6. Export a short test `.acq` (≥3 pulses) and run `read_acq()` to confirm bioread
+   parses it and to read the **real channel names**.
+7. Rewrite `channel_map.json` with the real names/units (from `inspect_streams.py`
+   + the `.acq`), including the correct `scale_reference_to_wearable`.
+8. Confirm `neurokit2` imports in the analysis machine's venv.
+
 ## 4. Developing/Testing without hardware (mocks)
 
 ```powershell

@@ -45,8 +45,9 @@ def main():
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--value", default="01", help="trigger value: int 0-255 or hex (e.g. 01, FF)")
     ap.add_argument("--width-ms", type=float, default=50.0, help="TTL pulse width")
-    ap.add_argument("--pulses", type=int, default=2,
-                    help="number of sync pulses to fire (0 = run forever until stopped)")
+    ap.add_argument("--pulses", type=int, default=3,
+                    help="number of sync pulses to fire (>=3 so the clock-fit residual "
+                         "is meaningful; 0 = run forever until stopped)")
     ap.add_argument("--interval", type=float, default=5.0, help="seconds between pulses")
     ap.add_argument("--rate", type=float, default=100.0, help="continuous stream sample rate (Hz)")
     ap.add_argument("--marker-name", default="BiHomeSync", help="LSL trigger stream name")
@@ -60,7 +61,15 @@ def main():
     outlet = _make_trigger_outlet(args.marker_name, args.rate)
     print(f"LSL continuous trigger '{args.marker_name}' @ {args.rate:.0f} Hz up. "
           f"TTL value={value} (0x{value:02X}).")
-    time.sleep(1.0)  # let consumers (BiHome viewer / LabRecorder) subscribe
+    # Wait for a consumer so the first pulses are not emitted into the void. The
+    # BiHome viewer records only streams it already knows at REC time, so this
+    # stream must be up (and ideally subscribed) before REC.
+    if outlet.wait_for_consumers(8.0):
+        print("  consumer attached (a recorder is subscribed).")
+    else:
+        print("  WARNING: no LSL consumer yet — make sure BiHome shows BiHomeSync and "
+              "you press REC; it records only streams known at REC.", file=sys.stderr)
+    time.sleep(1.0)
 
     ttl = None
     if not args.no_ttl:
@@ -103,7 +112,17 @@ def main():
                 outlet.push_sample([val], timestamp=now)
                 if val != prev:
                     if ttl is not None:
-                        ttl.send_value(value) if val else ttl.reset()
+                        try:
+                            ttl.send_value(value) if val else ttl.reset()
+                        except Exception as e:
+                            print(f"  !! TTL write failed ({type(e).__name__}: {e}) — "
+                                  f"continuing MARKER-ONLY so BiHomeSync keeps recording.",
+                                  file=sys.stderr)
+                            try:
+                                ttl.close()
+                            except Exception:
+                                pass
+                            ttl = None
                     if val:
                         fired += 1
                         tag = "" if forever else f"/{args.pulses}"

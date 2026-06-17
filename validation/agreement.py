@@ -184,7 +184,13 @@ def xcorr_lag(x: np.ndarray, y: np.ndarray, fs: float, max_lag_s: float = 2.0) -
         return float("nan")
     max_lag = int(round(max_lag_s * fs))
     max_lag = min(max_lag, x.size - 1)
-    corr = np.correlate(x, y, mode="full")
+    # FFT cross-correlation: O(n log n) instead of np.correlate's O(n^2), which
+    # is minutes-slow on long high-rate recordings (e.g. 130 Hz x 1 h ECG).
+    try:
+        from scipy.signal import correlate as _correlate
+        corr = _correlate(x, y, mode="full", method="fft")
+    except Exception:
+        corr = np.correlate(x, y, mode="full")
     lags = np.arange(-(x.size - 1), x.size)
     center = x.size - 1
     lo, hi = center - max_lag, center + max_lag + 1

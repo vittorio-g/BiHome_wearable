@@ -81,6 +81,25 @@ def test_match_pulses_count_mismatch_raises():
     raise AssertionError("expected ValueError on count mismatch")
 
 
+def test_match_pulses_consistent_spacing_ok():
+    a = np.array([10.0, 70.0, 130.0, 190.0])
+    b = 1.0003 * a + 5.0            # same drift -> consistent spacing
+    ra, rb = sync.match_pulses(a, b)
+    assert ra.size == 4 and rb.size == 4
+
+
+def test_match_pulses_inconsistent_spacing_raises():
+    # equal counts by coincidence (a spurious edge on one side, a missing one on
+    # the other) -> spacings don't match -> must be rejected, not silently fitted
+    a = np.array([10.0, 70.0, 130.0, 190.0])
+    b = np.array([10.0, 12.0, 130.0, 190.0])   # 2nd pulse is spurious
+    try:
+        sync.match_pulses(a, b)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError on inconsistent pulse spacing")
+
+
 def _run_standalone():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

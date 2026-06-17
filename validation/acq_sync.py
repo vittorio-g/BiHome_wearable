@@ -54,7 +54,17 @@ def read_acq(path: str) -> Dict[str, dict]:
     data = bioread.read_file(path)
     chans = {}
     for ch in data.channels:
-        chans[ch.name] = {
+        if ch.data is None or getattr(ch, "samples_per_second", 0) in (None, 0):
+            continue  # skip empty / rate-less channels rather than crashing later
+        name = ch.name
+        if name in chans:
+            # AcqKnowledge often repeats names (e.g. several "Digital input");
+            # disambiguate so channels don't silently overwrite each other.
+            k = 2
+            while f"{name}_{k}" in chans:
+                k += 1
+            name = f"{name}_{k}"
+        chans[name] = {
             "fs": float(ch.samples_per_second),
             "samples": np.asarray(ch.data, dtype=float),
         }
@@ -101,23 +111,31 @@ def build_biopac_stream(physio: Dict[str, dict], slope: float, intercept: float,
 
 def inject_biopac_from_acq(streams: Dict[str, dict], xdf_marker_times: np.ndarray,
                            acq_path: str, trigger_channel, stream_name: str = "BIOPAC",
-                           threshold: float = None) -> dict:
+                           threshold: float = None, min_interval_s: float = 0.5,
+                           polarity: str = "rising", keep_channels=None) -> dict:
     """Read the .acq, align it to the XDF marker times via the shared TTL, add a
-    'BIOPAC' pseudo-stream to `streams`, and return the alignment diagnostics."""
+    'BIOPAC' pseudo-stream to `streams`, and return the alignment diagnostics.
+    keep_channels: if given, only these .acq channels are kept (the ones the
+    channel_map actually pairs), so unrelated channels don't bloat the stream."""
     chans = read_acq(acq_path)
-    pulses = trigger_times(chans, trigger_channel, threshold)
+    pulses = trigger_times(chans, trigger_channel, threshold, min_interval_s, polarity)
     return _align_and_inject(streams, xdf_marker_times, chans, pulses,
-                             trigger_channel, stream_name)
+                             trigger_channel, stream_name, keep_channels)
 
 
 def _align_and_inject(streams, xdf_marker_times, chans, pulses, trigger_channel,
-                      stream_name) -> dict:
+                      stream_name, keep_channels=None) -> dict:
     """Shared core (separated from file I/O so tests can pass synthetic chans)."""
     a, b = sync.match_pulses(np.asarray(xdf_marker_times, dtype=float), pulses)
     slope, intercept, max_resid, n = sync.fit_clock_map(a, b)
     trig_name = (list(chans.keys())[trigger_channel]
                  if isinstance(trigger_channel, int) else trigger_channel)
     physio = {k: v for k, v in chans.items() if k != trig_name}
+    if keep_channels:
+        keep = set(keep_channels)
+        filtered = {k: v for k, v in physio.items() if k in keep}
+        if filtered:  # only narrow when at least one requested channel exists
+            physio = filtered
     streams[stream_name] = build_biopac_stream(physio, slope, intercept, stream_name)
     return {"slope": slope, "intercept": intercept, "max_resid_s": max_resid,
             "n_pulses": n, "channels": list(physio.keys())}

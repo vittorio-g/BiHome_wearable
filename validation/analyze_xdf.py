@@ -71,7 +71,16 @@ def _series(stream, ch_idx):
     data = np.asarray(stream["time_series"], dtype=float)
     if data.ndim == 1:
         data = data.reshape(-1, 1)
-    return ts, data[:, ch_idx]
+    vals = data[:, ch_idx]
+    # np.interp requires strictly increasing x; XDF can have out-of-order or
+    # duplicate timestamps (multi-segment recordings, BLE/WiFi dropouts). Sort
+    # and drop duplicate timestamps so interpolation stays correct.
+    if ts.size > 1 and np.any(np.diff(ts) <= 0):
+        order = np.argsort(ts, kind="mergesort")
+        ts, vals = ts[order], vals[order]
+        keep = np.concatenate(([True], np.diff(ts) > 0))
+        ts, vals = ts[keep], vals[keep]
+    return ts, vals
 
 
 def _align_pair(w_stream, w_idx, r_stream, r_idx, scale_ref,
@@ -211,13 +220,27 @@ def main():
     ap.add_argument("--xdf-trigger", default=None,
                     help="name of the LSL marker stream in the XDF carrying the TTL events")
     ap.add_argument("--acq-threshold", type=float, default=None,
-                    help="TTL high/low threshold for pulse detection (default: auto)")
+                    help="TTL high/low threshold for .acq pulse detection (default: auto)")
+    ap.add_argument("--acq-polarity", choices=["rising", "falling"], default="rising",
+                    help="TTL edge polarity on the .acq trigger channel")
+    ap.add_argument("--acq-min-interval", type=float, default=0.5,
+                    help="min seconds between .acq pulses (debounce)")
+    ap.add_argument("--xdf-trigger-threshold", type=float, default=0.5,
+                    help="high/low threshold for the XDF trigger stream")
+    ap.add_argument("--max-resid-ms", type=float, default=20.0,
+                    help="warn if the TTL clock-fit residual exceeds this (sync-quality check)")
     args = ap.parse_args()
 
     if not os.path.isfile(args.xdf):
         print(f"ERROR: no such file: {args.xdf}", file=sys.stderr); return 1
     with open(args.map, encoding="utf-8") as f:
         cmap = json.load(f)
+
+    if not ss._HAVE_NK and any((p.get("kind") or "").lower() in ("ecg", "eda")
+                               for p in cmap["pairs"]):
+        print("  !! WARNING: neurokit2 not installed — ECG/EDA signal-specific metrics "
+              "(HR/HRV/beat-F1, SCL/SCR) will be NaN. `pip install neurokit2`",
+              file=sys.stderr)
 
     stem = os.path.splitext(os.path.basename(args.xdf))[0]
     out_dir = args.out or os.path.join(_HERE, "reports", stem)
@@ -241,17 +264,24 @@ def main():
         trig_vals = np.asarray(trig_stream["time_series"], dtype=float)
         if trig_vals.ndim > 1:
             trig_vals = trig_vals[:, 0]
-        marker_times = sync.rising_edge_times(trig_ts, trig_vals)
+        marker_times = sync.rising_edge_times(trig_ts, trig_vals,
+                                              threshold=args.xdf_trigger_threshold)
         print(f"XDF trigger '{args.xdf_trigger}': {marker_times.size} rising edge(s)")
         trig = args.acq_trigger
         try:
             trig = int(trig)
         except ValueError:
             pass
+        # only keep the .acq channels the channel_map actually pairs
+        keep = {p["reference"]["channel"] for p in cmap["pairs"]
+                if isinstance(p["reference"].get("channel"), str)}
         try:
             diag = acqs.inject_biopac_from_acq(
                 streams, marker_times, args.acq, trig,
-                threshold=args.acq_threshold)
+                threshold=args.acq_threshold,
+                min_interval_s=args.acq_min_interval,
+                polarity=args.acq_polarity,
+                keep_channels=keep or None)
         except Exception as e:
             print(f"ERROR aligning .acq: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
@@ -259,6 +289,17 @@ def main():
               f"slope={diag['slope']:.6f}, offset={diag['intercept']:.3f}s, "
               f"max_residual={diag['max_resid_s'] * 1000:.1f}ms, "
               f"channels={diag['channels']}")
+        # Sync-quality gate: surface a bad fit loudly instead of analysing it silently.
+        if diag["n_pulses"] < 3:
+            print(f"  !! SYNC WARNING: only {diag['n_pulses']} pulse(s) — the residual "
+                  f"cannot detect a bad pulse (a line always fits 2 points) and drift is "
+                  f"unverified. Use >=3 pulses spread across the session.", file=sys.stderr)
+        if diag["max_resid_s"] * 1000 > args.max_resid_ms:
+            print(f"  !! SYNC WARNING: clock-fit residual {diag['max_resid_s']*1000:.1f} ms "
+                  f"> {args.max_resid_ms:.0f} ms — pulses may be mismatched.", file=sys.stderr)
+        if not (0.999 <= diag["slope"] <= 1.001):
+            print(f"  !! SYNC WARNING: clock slope {diag['slope']:.6f} far from 1.0 — "
+                  f"suspicious (expected drift < ~1000 ppm).", file=sys.stderr)
 
     results = {}
     for pair in cmap["pairs"]:
@@ -270,10 +311,13 @@ def main():
         try:
             w_idx = _resolve_channel(streams[ws], pair["wearable"]["channel"])
             r_idx = _resolve_channel(streams[rs], pair["reference"]["channel"])
+            # ECG is sharp: a wide lag window can lock onto the wrong beat, so
+            # restrict it. Other signals are smooth and tolerate a wide window.
+            max_lag = 0.25 if (pair.get("kind") or "").lower() == "ecg" else 2.0
             grid, w, r, fs, lag = _align_pair(
                 streams[ws], w_idx, streams[rs], r_idx,
                 pair.get("scale_reference_to_wearable", 1.0),
-                lag_correct=args.lag_correct)
+                lag_correct=args.lag_correct, max_lag_s=max_lag)
         except Exception as e:
             print(f"SKIP {name}: {type(e).__name__}: {e}")
             continue
@@ -295,7 +339,13 @@ def main():
                 for k in sk))
 
     if not results:
-        print("No pairs analysed (check channel_map vs streams in the XDF).")
+        msg = ("No pairs analysed — the channel_map stream/channel names did not match "
+               "what is in the recording. Loaded streams: " + ", ".join(streams) + ".")
+        if not args.acq:
+            msg += (" If the reference is a separate BIOPAC .acq, you must pass "
+                    "--acq/--acq-trigger/--xdf-trigger (otherwise the 'BIOPAC' stream "
+                    "is absent and every pair is skipped).")
+        print(msg)
         return 1
 
     with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
