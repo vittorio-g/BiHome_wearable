@@ -15,3 +15,6 @@ pyxdf
 # Signal-specific processing (ECG R-peaks / HRV, EDA tonic-phasic / SCR).
 # Heavier; pulled in for the signal-specific agreement sprint.
 neurokit2
+
+# Reading BIOPAC AcqKnowledge .acq files (offline TTL-sync path).
+bioread
