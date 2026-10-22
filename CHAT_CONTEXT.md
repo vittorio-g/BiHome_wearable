@@ -1,15 +1,17 @@
 # BiHome Wearable — chat context primer
 
-> **Per Vittorio**: copia-incolla questo intero file in una nuova chat
-> Claude (su qualsiasi dispositivo) per fargli ereditare lo stato del
-> progetto. Aggiornalo man mano che cambiano cose importanti.
+> **Per chi lavora al progetto**: copia-incolla questo intero file in una
+> nuova chat Claude (su qualsiasi dispositivo) per fargli ereditare lo stato
+> del progetto. Aggiornalo man mano che cambiano cose importanti.
 >
 > **Per Claude**: questo è un riassunto operativo del progetto BiHome
 > Wearable. Leggilo per intero prima di fare qualsiasi cosa. Alla fine
 > trovi il "playbook" su come continuare il lavoro.
 >
 > **Ultimo aggiornamento**: 2026-10-22
-> **Ultimo lavoro sul codice**: `d83e7cf` (2026-06-09) — vedere §12.
+> **Passaggio di consegne**: il 2026-10-22 Vittorio ha lasciato il progetto
+> a fine borsa e il PC di sviluppo è stato resettato. Chi riprende parte da
+> **`HANDOFF.md`** (persone) e da questo file (sessioni Claude) — §12.
 
 ---
 
@@ -72,7 +74,7 @@ Vedere `HTI.md` per analisi human-technology interaction completa.
 
 ```
 BiHome_wearable/
-├── BiHome_wearable.py          ← backend principale (~4200 righe)
+├── BiHome_wearable.py          ← backend principale (~4550 righe)
 ├── Viewer/
 │   ├── lsl_viewer.py           ← viewer PyQt5, subprocess separato
 │   ├── bihome.ico              ← icona app
@@ -89,7 +91,7 @@ BiHome_wearable/
 ├── CHAT_CONTEXT.md             ← questo file
 ├── Avvia BiHome (da sorgente).bat ← launcher Python (bypass Smart App Control)
 └── dist/BiHome Wearable/
-    ├── BiHome Wearable.exe     ← ⚠️ build STALE (2026-05-25), vedere §12
+    ├── BiHome Wearable.exe     ← generato da build_exe.py (gitignored)
     └── _internal/              ← dipendenze bundle
 ```
 
@@ -198,24 +200,38 @@ State files in `%APPDATA%/BiHome/`:
   due sono sfuggiti agli audit statici. Qualsiasi modifica al percorso di
   startup va provata in **tutte e tre** le modalità di lancio.
 
+**Handoff — 2026-10-22**
+- `build_exe.py`: PyInstaller lanciato con `python -m PyInstaller` (Smart App
+  Control bloccava lo stub `pyinstaller.exe`).
+- `build_exe.py`: 🔴 `--collect-submodules brainflow` → `--collect-all
+  brainflow`. **Nessun exe aveva mai incluso le DLL native di BrainFlow**
+  (`brainflow/lib/BoardController.dll` ecc.): l'import è lazy, quindi l'exe
+  partiva, i Polar andavano, ma **ogni connessione EmotiBit dall'exe falliva**.
+  Da sorgente non succedeva. Terzo bug dello stesso tipo: dipende dalla
+  modalità di lancio.
+- Merge di `validation`, `legacy/`, `requirements.txt`, `HANDOFF.md`.
+
 ---
 
-## 6b. Branch `validation` — lavoro NON in main ⚠️
+## 6b. Pipeline di validazione (`validation/`)
 
-Esiste un branch remoto **`validation`** (14 commit, 2026-06-16/17, +2834
-righe) che è in realtà **il lavoro più recente del progetto**, successivo a
-tutto quello che sta in `main`. Chi riprende il progetto deve saperlo:
-`git log main` da solo non lo mostra.
+Sviluppata sul branch **`validation`** (14 commit, 2026-06-16/17, +2834
+righe) e **unita in `main` il 2026-10-22** (merge `215968d`). Il branch
+remoto resta per tracciabilità, ma non serve più usarlo.
 
 **Cosa fa**: valida le wearable (Polar H10, EmotiBit) contro un **BIOPAC
 MP160** usato come gold standard, registrando entrambi in un XDF
 sincronizzato e calcolando metriche di agreement per segnale.
 
 **È puramente additivo** — non tocca `BiHome_wearable.py` né il viewer. Solo
-`VALIDATION.md` + un package `validation/` + 3 righe di `.gitignore`. Quindi
-il merge in main è a basso rischio; è rimasto fuori per tenere le dipendenze
-pesanti (scipy, pandas, matplotlib, pyxdf, neurokit2) **fuori dal build
-PyInstaller** dell'app.
+`VALIDATION.md` + un package `validation/` + 3 righe di `.gitignore`. Le sue
+dipendenze pesanti (scipy, pandas, matplotlib, pyxdf, neurokit2) restano
+**fuori dal build PyInstaller**: stanno in `validation/requirements-validation.txt`,
+non in `requirements.txt`, e `build_exe.py` le esclude.
+
+Test: 25 passano sulla dev machine (2026-10-22); `test_acq_sync.py` non si
+carica su Anaconda base perché lì matplotlib è compilato per NumPy 1.x —
+problema d'ambiente, non del codice. Usare un venv dedicato.
 
 **Architettura della validazione**: AcqKnowledge **non esporta** i propri dati
 via LSL (la licenza LSL solo *ingerisce*), quindi il BIOPAC si registra sul
@@ -249,8 +265,8 @@ dipendenze esterne non verificate: che `bioread` parsi il `.acq` reale, e che
 la catena USB-TTL→STP100D consegni davvero gli impulsi (il driver è
 write-only, non può accorgersi di un cavo staccato).
 
-**Se Vittorio chiede di lavorare alla validazione**: `git checkout validation`
-e leggere `VALIDATION.md` per intero prima di toccare qualsiasi cosa.
+**Per lavorare alla validazione**: leggere `VALIDATION.md` per intero prima
+di toccare qualsiasi cosa.
 
 ---
 
@@ -326,10 +342,9 @@ Pre-distribuzione, da fare su almeno 2 macchine (dev + altra):
 ## 10. TODO / open items
 
 **Aperti / da verificare:**
-- 🔴 **L'exe in `dist/` è vecchio (2026-05-25) e contiene ancora il crash
-  `DeviceHealth`.** Il sorgente è fixato, l'exe NO. Da ribuildare prima di
-  distribuirlo a chiunque (`python build_exe.py`, con il trucco del rename
-  della dir vecchia — vedere §8).
+- 🔴 **L'exe non è mai stato provato con le EmotiBit** (prima del
+  2026-10-22 non poteva funzionare: mancavano le DLL di BrainFlow, vedi §6).
+  Primo test da fare su una macchina senza Smart App Control.
 - ⚠️ **EmotiBit non scoperto** nell'ultimo tentativo di test (2026-06-09).
   Log: `EmotiBit scan complete: 4 packets total (4 self-echoes), 0 unique
   IDs: set()` poi `BrainFlow attempt 1: BOARD_NOT_READY_ERROR:7 unable to
@@ -364,13 +379,14 @@ Quando ricevi questo file in una nuova chat e Vittorio chiede di
 lavorare a BiHome, leggi nell'ordine:
 
 0. **`git log --oneline --all -20` e `git branch -a`** — prima di tutto:
-   verifica su quale branch sei e se `validation` ha lavoro più recente (§6b).
+   verifica su quale branch sei e se esiste lavoro più recente fuori da `main`.
+   Poi **`HANDOFF.md`** per lo stato al passaggio di consegne.
 1. **Questo file** (CHAT_CONTEXT.md) — overview e stato corrente
 2. **README.md** — setup dev
 3. **DISTRIBUTION.md** — guida utente finale (utile per capire il
    contratto con l'utente)
 4. **HTI.md** — design rationale, principi UX
-5. **BiHome_wearable.py** — backend (~4200 righe, troppo per una
+5. **BiHome_wearable.py** — backend (~4550 righe, troppo per una
    lettura completa: usa `Grep` per cercare la funzione/classe
    rilevante alla richiesta)
 6. **Viewer/lsl_viewer.py** — viewer (anche questo grosso)
@@ -399,17 +415,28 @@ lavorare a BiHome, leggi nell'ordine:
 
 ## 12. Stato corrente al 2026-10-22
 
-**Codice**
-- HEAD = `d83e7cf` (2026-06-09), working tree pulito, allineato con
-  `origin/main`. `BiHome_wearable.py` = 4534 righe, `ast.parse` OK.
-- Repo GitHub: `https://github.com/vittorio-g/BiHome_wearable.git`.
-- ⚠️ Il branch **`validation`** (2026-06-17) contiene il lavoro più recente del
-  progetto e **non è in `main`** — vedere §6b. Non dimenticartelo: guardando
-  solo `main` sembra che il progetto sia fermo al 9 giugno.
-- Zero path hardcoded `vitto` nei `.py` → clonabile su qualsiasi macchina.
-- Entrambi i fix critici di startup (`8be4fd5` + `d83e7cf`) sono in `main`.
+**Passaggio di consegne (2026-10-22)**
+- Vittorio ha finito la borsa e lascia il progetto. Il PC di sviluppo (HP OMEN
+  30L) viene resettato: i percorsi `C:\Users\vitto\...` qui sotto **non
+  esistono più**, restano solo come contesto storico.
+- Tutto il codice è su GitHub, branch `main` (repo **pubblico**,
+  `vittorio-g/BiHome_wearable`). In quel giorno sono stati aggiunti: merge di
+  `validation`, prototipi in `legacy/` (credenziali oscurate),
+  `requirements.txt` con versioni fissate, `HANDOFF.md`, fix di `build_exe.py`
+  per Smart App Control. Branch extra: `archive/polar2-firmware-wip-2026-03`
+  (uno stash del 2026-03-25 recuperato).
+- Dati, registrazioni di prova, prototipi originali, media, credenziali WiFi
+  ed exe compilato: Google Drive di Vittorio, cartella
+  `BiHome Wearable - Handoff 2026-10` (il suo `00_LEGGIMI.md` la descrive).
+- Verificato prima del push: nessuna credenziale nei file tracciati né nella
+  storia Git.
 
-**Le due macchine**
+**Codice**
+- `BiHome_wearable.py` = 4556 righe, `ast.parse` OK. Entrambi i fix critici
+  di startup (`8be4fd5` + `d83e7cf`) sono in `main`.
+- Zero path hardcoded `vitto` nei `.py` → clonabile su qualsiasi macchina.
+
+**Le due macchine (storico, entrambe dismesse o da verificare)**
 
 | | Dev machine | Seconda macchina |
 |---|---|---|
@@ -425,10 +452,12 @@ bleak 3.0.2 (compatibile senza modifiche), brainflow 5.22.2, numpy 2.4.6,
 pyqtgraph 0.14.0. Il python di sistema lì è 3.8 (EOL) → non usarlo.
 
 **Build**
-- 🔴 `dist/BiHome Wearable/BiHome Wearable.exe` è del **2026-05-25**, quindi
-  **precedente a entrambi i fix di startup** → quell'exe crasha appena si
-  chiude il wizard. Non distribuirlo. Serve `python build_exe.py` (solo sulla
-  dev machine: la seconda non ha PyInstaller configurato).
+- Exe ricompilato il 2026-10-22 dal codice corretto e messo nel Drive
+  (`01_Codice/`). **Mai avviato con i dispositivi**: Smart App Control sulla
+  dev machine blocca gli exe non firmati, quindi il primo test va fatto
+  altrove. Gli exe del 2026-05-25 contengono entrambi i crash: buttarli.
+- Smart App Control blocca anche `pyinstaller.exe` (stub pip non firmato):
+  `build_exe.py` ora usa `python -m PyInstaller`.
 
 **Cos'è stato verificato e cosa no**
 - ✅ L'app da sorgente parte, supera lo zombie-killer e raggiunge il wizard
@@ -438,25 +467,20 @@ pyqtgraph 0.14.0. Il python di sistema lì è 3.8 (EOL) → non usarlo.
 - ❌ Sessione multi-partecipante (2+ Polar + 2 EmotiBit): mai verificata.
 - ❌ EmotiBit: non scoperta nell'ultimo tentativo sulla dev machine
   (`BOARD_NOT_READY_ERROR:7`), firewall mai applicato sulla seconda.
-- ❓ Shortcut desktop `BiHome Wearable.lnk`: creato, visibilità icona mai
-  confermata (sospetto refresh shell / interferenza Google Drive sync).
+- ❌ Validazione contro il BIOPAC: mai eseguita su hardware reale.
 
 **Gap temporale**
-- Ultimo lavoro sul codice: **2026-06-09**. Da allora ~4 mesi di pausa. Non
-  assumere che l'hardware sia nello stesso stato, che le librerie non siano
-  cambiate dopo un `conda update`, o che Vittorio ricordi i dettagli.
-  **Riparti da una verifica, non da un'assunzione.**
+- Ultimo lavoro sull'app: **2026-06-09** (validazione: 2026-06-17). Non
+  assumere che l'hardware sia nello stesso stato o che le librerie non siano
+  cambiate. **Riparti da una verifica, non da un'assunzione.**
 
-**⚠️ Google Drive vs `.git` (dev machine)**
-Il Desktop è sincronizzato da Google Drive File Stream, che semina file
-`desktop.ini` (icone cartella) **dentro `.git/`**, compreso `.git/refs/`.
-Git li interpreta come ref e `git fetch` muore con
+**⚠️ Google Drive vs `.git`**
+Se il repo sta in una cartella sincronizzata da Google Drive (succedeva sul
+Desktop della dev machine), Drive semina file `desktop.ini` **dentro
+`.git/`**, compreso `.git/refs/`, e `git fetch` muore con
 `fatal: bad object refs/desktop.ini`. Pulizia:
-```bash
-find .git -name "desktop.ini" -delete
-```
-Succederà di nuovo. Se diventa fastidioso: spostare il repo fuori dal
-Desktop, o escludere la cartella dalla sync di Drive.
+`find .git -name "desktop.ini" -delete`. Meglio clonare il repo fuori dalle
+cartelle sincronizzate.
 
 **Primo step consigliato quando si riprende**
 1. `python BiHome_wearable.py` da sorgente (NON l'exe) e vedere se parte.
@@ -466,9 +490,10 @@ Desktop, o escludere la cartella dalla sync di Drive.
    e **aprire davvero l'XDF** (non fidarsi dell'esistenza del file).
 4. Solo DOPO che il flow funziona: ribuildare l'exe.
 
-**Per Claude**: se Vittorio chiede di continuare il lavoro, chiedi
-prima cosa vuole fare. Non assumere che il lavoro pendente debba essere
-ripreso da dove l'ho lasciato — sono passati mesi.
+**Per Claude**: probabilmente chi ti scrive non è Vittorio ma chi ha
+ereditato il progetto, e può non conoscerne la storia. Chiedi prima cosa
+vuole fare; non assumere che il lavoro pendente vada ripreso da dove è
+stato lasciato.
 
 ---
 
@@ -487,11 +512,11 @@ Contesto in due righe: sistema di acquisizione multi-dispositivo (Polar
 H10 via BLE + EmotiBit via WiFi → LSL → XDF) per ricerca in psicologia,
 PyQt5 + bleak + BrainFlow + pylsl, ~4500 righe nel backend principale.
 
-Attenzione a una cosa: il lavoro più recente sta sul branch `validation`,
-NON su main (pipeline di validazione contro BIOPAC — §6b del file).
+Leggi anche HANDOFF.md: il 2026-10-22 l'autore originale ha lasciato il
+progetto e c'è stato un passaggio di consegne.
 
 Punti aperti che trovi dettagliati in §6b, §10 e §12 di quel file:
-1. l'exe in dist/ è vecchio e contiene due crash già fixati nel sorgente
+1. l'exe compilato il 2026-10-22 non è mai stato provato con i dispositivi
 2. il test end-to-end oltre il wizard (REC → STOP → XDF leggibile) non è
    mai stato completato
 3. EmotiBit non veniva scoperta nell'ultimo tentativo (BOARD_NOT_READY)

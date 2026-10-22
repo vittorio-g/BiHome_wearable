@@ -10,6 +10,9 @@ A multi-device physiological and motion data acquisition system for experimental
 | `DISTRIBUTION.md` | end users | Running the bundled `.exe`, SmartScreen / Smart App Control workarounds, finding device addresses |
 | `HTI.md` | reviewers / academic | Human-technology interaction analysis: usability for psychology researchers |
 | `CHAT_CONTEXT.md` | future Claude sessions | Single-paste primer to bring a fresh chat (any device) up to speed on project state |
+| `HANDOFF.md` | whoever takes the project over | Handoff of 2026-10-22 (Italian): where code, data and hardware are, what is verified, first steps |
+| `VALIDATION.md` | validation studies | Agreement of the wearables against a BIOPAC MP160 gold standard, two-PC TTL sync |
+| `legacy/README.md` | history | Nov 2025 – Mar 2026 prototypes that led to the current architecture |
 
 ---
 
@@ -115,7 +118,7 @@ The `beat` channel in `PolarH10_Sens` is **1.0** at the sample where an R-peak i
 ### Python Dependencies
 
 ```bash
-pip install pylsl pyserial brainflow numpy bleak pyxdf pyqtgraph PyQt5
+pip install -r requirements.txt   # pinned, known-good versions
 ```
 
 ### Standalone Windows Executable
@@ -167,7 +170,7 @@ The viewer auto-discovers all active LSL streams. To record:
 - Check the **REC** checkbox next to each stream to include
 - Enter an optional filename (defaults to current date/time)
 - Click **REC** to start, **STOP** to finish
-- The `.xdf` file is saved in `Viewer/recordings/` via LabRecorderCLI
+- The `.xdf` file is saved in `%APPDATA%\BiHome\recordings\` via LabRecorderCLI
 - A per-stream CSV is exported automatically at the end of recording
 
 ---
