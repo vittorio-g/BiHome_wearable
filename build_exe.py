@@ -61,7 +61,11 @@ args = [
     "--collect-all", "pyqtgraph",
     "--collect-all", "numpy",         # numpy 2.x + PyInstaller 6.x needs this
     "--collect-all", "bleak",
-    "--collect-submodules", "brainflow",
+    # collect-all, not collect-submodules: BrainFlow loads its native
+    # brainflow/lib/BoardController.dll (+ DataHandler etc.) via ctypes at
+    # runtime, and only collect-all bundles those binaries. Without them the
+    # exe starts fine but every EmotiBit connection fails.
+    "--collect-all", "brainflow",
     # Exclude heavy unused packages — pyqtgraph tries to import matplotlib
     # for optional features, pulling in a broken matplotlib-vs-numpy combo.
     "--exclude-module", "matplotlib",
