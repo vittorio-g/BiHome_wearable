@@ -4,7 +4,7 @@ Run:
     pip install pyinstaller
     python build_exe.py
 
-Output: dist/BiHome Wearable.exe
+Output: dist/BiHome Wearable/BiHome Wearable.exe
 The .exe is self-contained — it bundles PyQt5, pylsl, bleak, brainflow,
 numpy, pyqtgraph, the Montserrat fonts, and the bihome.ico icon.
 
@@ -34,7 +34,12 @@ if not os.path.isfile(icon_path):
     sys.exit(1)
 
 args = [
-    "pyinstaller",
+    # Run PyInstaller as a module of the current interpreter rather than via
+    # the pip-generated pyinstaller.exe stub: that stub is unsigned, so
+    # Windows 11 Smart App Control blocks it (WinError 4551), while the
+    # signed python.exe is allowed. Also avoids depending on Scripts/ being
+    # on PATH.
+    sys.executable, "-m", "PyInstaller",
     "--noconfirm",
     "--clean",
     "--name", "BiHome Wearable",
