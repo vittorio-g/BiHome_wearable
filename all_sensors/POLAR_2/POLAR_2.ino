@@ -164,8 +164,8 @@ struct RingACC {
   }
 };
 
-RingECG<512> ecgBuf;
-RingACC<512> accBuf;
+RingECG<400> ecgBuf;   // ~3s @ 130Hz, fits in RAM (4.8KB)
+RingACC<200> accBuf;   // ~4s @ 50Hz  (4.0KB)
 
 // ==============================
 // PC commands
@@ -402,16 +402,14 @@ void handlePmdData(const uint8_t *buf, int n, uint64_t arrivalUs64) {
       updatePolarClock(arrivalUs64, polar_ts_ns);
       lastSampleUs64 = polarNsToArduinoUs(polar_ts_ns);
 
-      // Sanity check: calibrazione ancora sporca se il timestamp convertito
-      // è >50ms nel futuro rispetto all'arrivo BLE. In quel caso reset
-      // calibrazione, svuota il buffer (nessun campione con timestamp errato)
-      // e usa il tempo di arrivo come fallback.
+      // Sanity check: se il timestamp convertito è troppo nel futuro
+      // rispetto all'arrivo BLE, la calibrazione è sporca.
+      // NON svuotiamo il buffer (perderemmo ~3s di dati validi),
+      // ma resettiamo solo la calibrazione e usiamo arrivalUs64 come fallback.
       int64_t delta = (int64_t)lastSampleUs64 - (int64_t)arrivalUs64;
-      if (delta > 50000LL) {
+      if (delta > 400000LL) {
         polar_clk_init   = false;
         polar_clk_off_us = 0;
-        ecgBuf.clear();
-        lastEcg_uV     = NAN;
         lastSampleUs64 = arrivalUs64;
       }
     }
@@ -497,8 +495,14 @@ bool sendStartACC() {
 // Dashboard output
 // ==============================
 void emitDashboardRow(uint64_t t_tick) {
-  ecgBuf.popUntil(t_tick, lastEcg_uV);
+  bool hadEcg = ecgBuf.popUntil(t_tick, lastEcg_uV);
   accBuf.popUntil(t_tick, lastAx_mg, lastAy_mg, lastAz_mg);
+
+  // Se non c'era nessun campione ECG nuovo nel buffer, non emettiamo nulla.
+  // In precedenza il firmware "teneva" l'ultimo valore, creando campioni
+  // costanti interleaved con i dati reali quando il burst BLE successivo
+  // arrivava — questo causava l'artefatto "fill" nel viewer.
+  if (!hadEcg) return;
 
   uint32_t w, us32;
   splitMicros64(t_tick, w, us32);
@@ -603,29 +607,55 @@ void loop() {
       delay(200);
       return;
     }
-    delay(150);  // pausa più lunga per dare tempo alla Polar di processare
+    // Il Polar deve processare il comando ECG e inviare la risposta
+    // (indication BLE). Facciamo polling attivo per dare tempo allo stack
+    // BLE di smaltire la risposta prima di inviare il comando ACC.
+    for (int i = 0; i < 50; i++) { BLE.poll(); delay(10); }  // 500ms con polling
   }
 
-  // avvia ACC subito dopo ECG (non aspettare haveEcgData)
+  // avvia ACC dopo che ECG è stato processato
   if (connected && ecgStartSent && !accStartSent) {
-    delay(100);
+    // ulteriore polling per assicurarsi che lo stack BLE sia libero
+    for (int i = 0; i < 20; i++) { BLE.poll(); delay(10); }  // 200ms
     if (!sendStartACC()) {
-      delay(200);
+      // non disconnettere — l'ECG funziona comunque
+      Serial.println("WARN:ACC_will_retry");
+      delay(500);
       return;
     }
-    delay(150);
+    for (int i = 0; i < 20; i++) { BLE.poll(); delay(10); }  // 200ms post-ACC
   }
 
-  // drena più notifiche PMD per loop
-  for (int i = 0; i < 16; i++) {
-    BLE.poll();
-    if (!(pmdData && pmdData.valueUpdated())) break;
+  // ── BLE drain + serial emit: interleaved ──
+  // Strategia: alterna tra polling BLE e emissione seriale.
+  // In ogni "slot" di ~1ms facciamo: 1) BLE poll  2) emit 1 sample.
+  // Così il modulo NINA non accumula notifiche non lette.
+  {
+    uint64_t now_us = readMicros64();
+    // Emit up to 16 samples per loop — enough to keep up with 130 Hz
+    // between loop iterations (~8ms at 1000 Hz loop).
+    for (int slot = 0; slot < 16; slot++) {
+      // 1) BLE poll — controlla se ci sono notifiche in arrivo
+      BLE.poll();
+      if (pmdData && pmdData.valueUpdated()) {
+        uint64_t arrival = readMicros64();
+        uint8_t buf[256];
+        int n = pmdData.readValue(buf, sizeof(buf));
+        if (n > 0) handlePmdData(buf, n, arrival);
+      }
 
-    uint64_t arrival = readMicros64();
-    uint8_t buf[256];
-    int n = pmdData.readValue(buf, sizeof(buf));
-    if (n > 0) {
-      handlePmdData(buf, n, arrival);
+      // 2) Emit one buffered sample over serial
+      if (haveEcgData) {
+        now_us = readMicros64();
+        if ((int64_t)(now_us - nextOutUs64) >= 0) {
+          emitDashboardRow(nextOutUs64);
+          nextOutUs64 += (uint64_t)OUT_PERIOD_US;
+        } else {
+          break;  // buffer drained, nothing left to emit
+        }
+      } else {
+        break;
+      }
     }
   }
 
@@ -637,33 +667,20 @@ void loop() {
     }
   }
 
-  // warning se ECG non parte
+  // warning/retry se ECG non parte
   if (connected && ecgStartSent && !haveEcgData) {
     unsigned long nowMs = millis();
-
     if ((nowMs - ecgStartMs) > 1500 && !accStartSent) {
       Serial.println("WARN:NO_ECG_DATA_YET");
-      // piccolo retry ECG
       ecgStartSent = false;
       delay(100);
     }
-
     if (nowMs - lastNoDataWarnMs > 3000) {
       Serial.println("WARN:WAITING_FOR_ECG");
       lastNoDataWarnMs = nowMs;
     }
   }
 
-  // dashboard output: un campione per iterazione — niente burst.
-  // Il batch BLE viene spalmato su più loop() consecutivi invece di essere
-  // emesso tutto in una volta, dando al viewer una curva fluida.
-  if (haveEcgData) {
-    uint64_t now = readMicros64();
-    if ((int64_t)(now - nextOutUs64) >= 0) {
-      emitDashboardRow(nextOutUs64);
-      nextOutUs64 += (uint64_t)OUT_PERIOD_US;
-    }
-  }
-
-  delay(1);
+  // NO delay(1) — il loop gira il più veloce possibile per non perdere
+  // notifiche BLE. Il BLE.poll() interno fa yield al modulo NINA.
 }
