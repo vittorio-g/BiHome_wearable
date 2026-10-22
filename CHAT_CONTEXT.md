@@ -8,7 +8,8 @@
 > Wearable. Leggilo per intero prima di fare qualsiasi cosa. Alla fine
 > trovi il "playbook" su come continuare il lavoro.
 >
-> **Ultimo aggiornamento**: 2026-06-09
+> **Ultimo aggiornamento**: 2026-10-22
+> **Ultimo lavoro sul codice**: `d83e7cf` (2026-06-09) — vedere §12.
 
 ---
 
@@ -37,6 +38,13 @@ Vedere `HTI.md` per analisi human-technology interaction completa.
 - App data dir runtime: `%APPDATA%\BiHome\` (devices.json, recordings,
   logs)
 - Drive Google montato su `G:\Il mio Drive\` (per backup desktop)
+
+**Seconda macchina (Windows, run-from-source):**
+- Repo: `C:\Users\vitto\Downloads\BiHome_wearable\`
+- Python: virtualenv locale `.venv` su **Python 3.13** (il python di
+  sistema è 3.8, EOL — non usarlo). Interprete:
+  `.venv\Scripts\python.exe`.
+- Lancio: `Avvia BiHome (venv).bat` (gitignored, machine-local).
 
 **Su altre macchine (remoto):**
 - Se hai il repo clonato, replica i comandi sostituendo il path.
@@ -81,7 +89,7 @@ BiHome_wearable/
 ├── CHAT_CONTEXT.md             ← questo file
 ├── Avvia BiHome (da sorgente).bat ← launcher Python (bypass Smart App Control)
 └── dist/BiHome Wearable/
-    ├── BiHome Wearable.exe     ← build corrente (28.5 MB)
+    ├── BiHome Wearable.exe     ← ⚠️ build STALE (2026-05-25), vedere §12
     └── _internal/              ← dipendenze bundle
 ```
 
@@ -153,19 +161,7 @@ State files in `%APPDATA%/BiHome/`:
 - Funzione `_pick_ble_device_dialog()` (scanner BLE in-app)
 - Hint sulla scoperta MAC in DISTRIBUTION.md
 
-**Post-4.1.1 — run-from-source hardening (2026-06-09):**
-- Fix critico zombie-killer (`_kill_zombie_python_instances`): da sorgente via
-  venv, `python.exe` è uno **shim launcher** che spawna l'interprete reale come
-  figlio → due `python.exe` con cmdline identica. Il killer escludeva solo il
-  proprio `os.getpid()` (il figlio) e killava il **parent shim**, suicidando
-  l'app subito dopo il wizard. Ora protegge l'intera catena di antenati del
-  processo corrente (walk via ParentProcessId). No-op in modalità .exe (un solo
-  processo). Bug invisibile sulla dev machine (Anaconda/.exe non doppio-spawnano).
-- `.gitignore`: aggiunti `.venv/`, `venv/`, `LabRecorder/generic/` (sottocartella
-  plugin della release LabRecorder 1.17).
-- Nota: il fix `@dataclass` su `DeviceHealth` (commit 8be4fd5) è incluso a monte.
-
-**Post-4.1 (turno precedente):**
+**Post-4.1 — commit `474a734` (2026-05-26)**
 - Fix: `timer.stop()` in try/finally nel dialog BLE picker (era una potenziale crash su cancel)
 - Riordino UI: tasto "🔍 Scan nearby BLE" SOPRA il campo MAC nel dialog Add Device, nascosto per EmotiBit
 - Correzione: niente "LED blinking" — Polar H10 non ha LED, si attiva solo se indossato sul petto con elettrodi inumiditi
@@ -173,6 +169,34 @@ State files in `%APPDATA%/BiHome/`:
 - Nuovo file `Avvia BiHome (da sorgente).bat` per bypassare Smart App Control
 - Nuovo file `HTI.md` (analisi human-tech interaction, 13 sezioni)
 - Shortcut sul desktop creato via PowerShell (`C:\Users\vitto\Desktop\BiHome Wearable.lnk` → punta al .bat)
+
+**Hotfix — commit `8be4fd5` (2026-06-09) 🔴 critico**
+- `class DeviceHealth` (riga ~395) aveva annotazioni in stile dataclass
+  (incluso `lock: threading.Lock = field(default_factory=threading.Lock)`)
+  ma **mancava il decoratore `@dataclass`** → Python non sintetizzava
+  `__init__` → `TypeError: DeviceHealth() takes no arguments` a riga 4232,
+  crash immediato appena il wizard chiudeva, prima di avviare qualsiasi
+  thread di acquisizione.
+- Fix: aggiunto `@dataclass` sopra la classe (1 riga).
+- **Lezione**: il bug era invisibile a controlli di sintassi e al build —
+  si manifestava solo nel flow end-to-end. Gli audit statici non bastano:
+  serve lanciare l'app e arrivare oltre il wizard.
+
+**Post-4.1.1 — commit `d83e7cf` (2026-06-09), dalla seconda macchina**
+- Fix critico zombie-killer (`_kill_zombie_python_instances`, riga ~4153): da
+  sorgente via venv, `python.exe` è uno **shim launcher** che spawna
+  l'interprete reale come figlio → due `python.exe` con cmdline identica. Il
+  killer escludeva solo il proprio `os.getpid()` (il figlio) e killava il
+  **parent shim**, suicidando l'app subito dopo il wizard. Ora protegge
+  l'intera catena di antenati del processo corrente (walk via
+  `ParentProcessId`, cap a 16 hop contro i cicli di pid). No-op in modalità
+  .exe (un solo processo).
+- `.gitignore`: aggiunti `.venv/`, `venv/`, `Avvia BiHome (venv).bat`,
+  `LabRecorder/generic/` (sottocartella plugin della release LabRecorder 1.17).
+- **Nota sul pattern**: sia questo bug che `8be4fd5` colpivano *dopo* il
+  wizard e *solo* in certi ambienti (venv vs Anaconda vs frozen exe). Due su
+  due sono sfuggiti agli audit statici. Qualsiasi modifica al percorso di
+  startup va provata in **tutte e tre** le modalità di lancio.
 
 ---
 
@@ -247,6 +271,22 @@ Pre-distribuzione, da fare su almeno 2 macchine (dev + altra):
 
 ## 10. TODO / open items
 
+**Aperti / da verificare:**
+- 🔴 **L'exe in `dist/` è vecchio (2026-05-25) e contiene ancora il crash
+  `DeviceHealth`.** Il sorgente è fixato, l'exe NO. Da ribuildare prima di
+  distribuirlo a chiunque (`python build_exe.py`, con il trucco del rename
+  della dir vecchia — vedere §8).
+- ⚠️ **EmotiBit non scoperto** nell'ultimo tentativo di test (2026-06-09).
+  Log: `EmotiBit scan complete: 4 packets total (4 self-echoes), 0 unique
+  IDs: set()` poi `BrainFlow attempt 1: BOARD_NOT_READY_ERROR:7 unable to
+  prepare streaming session`. Mai investigato: può essere device spento,
+  su WiFi diversa, o regola firewall UDP 3131 mancante
+  (`install_firewall_rule.bat`). Da riprodurre prima di assumere che sia
+  un bug di codice.
+- ❓ **Test end-to-end mai completato.** Dopo il fix `8be4fd5` l'app è
+  partita ma il flow wizard → thread → viewer → REC → XDF non è stato
+  verificato fino in fondo. È il primo step logico quando si riprende.
+
 **Bug minori noti:**
 - `_resolve_app_data_dir` ha un fallback wording leggermente diverso fra
   `BiHome_wearable.py` e `Viewer/lsl_viewer.py` (cosmetico, stesso
@@ -301,23 +341,112 @@ lavorare a BiHome, leggi nell'ordine:
 
 ---
 
-## 12. Stato corrente al 2026-06-09
+## 12. Stato corrente al 2026-10-22
 
-- **Seconda macchina** configurata per girare da sorgente (no Anaconda qui):
-  repo in `C:\Users\vitto\Downloads\BiHome_wearable`, virtualenv `.venv` su
-  **Python 3.13** (il python di sistema è 3.8, EOL, da non usare). Interprete:
-  `.venv\Scripts\python.exe`. Deps: pyqt5 5.15.11, pylsl 1.18.2, bleak 3.0.2,
-  brainflow 5.22.2, numpy 2.4.6, pyqtgraph 0.14.0.
-- `bleak 3.0.2` verificato compatibile con l'uso nel codice (nessun pin/modifica).
-- `LabRecorderCLI.exe` + DLL scaricati in `LabRecorder/` dalla release v1.17.1
-  (binari gitignored). Registrazione XDF abilitata.
-- Launcher locale `Avvia BiHome (venv).bat` (gitignored) che usa il venv.
-- Fix zombie-killer applicato e **verificato**: l'app da sorgente parte, supera
-  il killer senza auto-terminarsi e raggiunge il wizard. Demo con solo Polar OK.
-- Prossimo step: test del flow completo (wizard → Polar [+ EmotiBit] → REC →
-  STOP → verifica XDF). Per EmotiBit serve la regola firewall UDP 3131
-  (`install_firewall_rule.bat`, admin) — non ancora applicata su questa macchina.
+**Codice**
+- HEAD = `d83e7cf` (2026-06-09), working tree pulito, allineato con
+  `origin/main`. `BiHome_wearable.py` = 4534 righe, `ast.parse` OK.
+- Repo GitHub: `https://github.com/vittorio-g/BiHome_wearable.git`.
+  Esiste anche un branch remoto `validation` (contenuto non verificato).
+- Zero path hardcoded `vitto` nei `.py` → clonabile su qualsiasi macchina.
+- Entrambi i fix critici di startup (`8be4fd5` + `d83e7cf`) sono in `main`.
+
+**Le due macchine**
+
+| | Dev machine | Seconda macchina |
+|---|---|---|
+| Repo | `C:\Users\vitto\Desktop\BiHome_wearable` | `C:\Users\vitto\Downloads\BiHome_wearable` |
+| Python | Anaconda `C:\Users\vitto\anaconda3` | venv `.venv\Scripts\python.exe`, Py 3.13 |
+| Lancio | `python BiHome_wearable.py` o il .bat | `Avvia BiHome (venv).bat` (gitignored) |
+| LabRecorder | binari presenti | v1.17.1 scaricata |
+| Firewall UDP 3131 | applicato | **non applicato** |
+| Smart App Control | **attivo** → exe bloccato | n/d |
+
+Deps verificate sulla seconda macchina: pyqt5 5.15.11, pylsl 1.18.2,
+bleak 3.0.2 (compatibile senza modifiche), brainflow 5.22.2, numpy 2.4.6,
+pyqtgraph 0.14.0. Il python di sistema lì è 3.8 (EOL) → non usarlo.
+
+**Build**
+- 🔴 `dist/BiHome Wearable/BiHome Wearable.exe` è del **2026-05-25**, quindi
+  **precedente a entrambi i fix di startup** → quell'exe crasha appena si
+  chiude il wizard. Non distribuirlo. Serve `python build_exe.py` (solo sulla
+  dev machine: la seconda non ha PyInstaller configurato).
+
+**Cos'è stato verificato e cosa no**
+- ✅ L'app da sorgente parte, supera lo zombie-killer e raggiunge il wizard
+  (verificato sulla seconda macchina dopo `d83e7cf`).
+- ✅ Demo con solo Polar OK.
+- ❌ Flow completo REC → STOP → XDF leggibile: **mai verificato**.
+- ❌ Sessione multi-partecipante (2+ Polar + 2 EmotiBit): mai verificata.
+- ❌ EmotiBit: non scoperta nell'ultimo tentativo sulla dev machine
+  (`BOARD_NOT_READY_ERROR:7`), firewall mai applicato sulla seconda.
+- ❓ Shortcut desktop `BiHome Wearable.lnk`: creato, visibilità icona mai
+  confermata (sospetto refresh shell / interferenza Google Drive sync).
+
+**Gap temporale**
+- Ultimo lavoro sul codice: **2026-06-09**. Da allora ~4 mesi di pausa. Non
+  assumere che l'hardware sia nello stesso stato, che le librerie non siano
+  cambiate dopo un `conda update`, o che Vittorio ricordi i dettagli.
+  **Riparti da una verifica, non da un'assunzione.**
+
+**⚠️ Google Drive vs `.git` (dev machine)**
+Il Desktop è sincronizzato da Google Drive File Stream, che semina file
+`desktop.ini` (icone cartella) **dentro `.git/`**, compreso `.git/refs/`.
+Git li interpreta come ref e `git fetch` muore con
+`fatal: bad object refs/desktop.ini`. Pulizia:
+```bash
+find .git -name "desktop.ini" -delete
+```
+Succederà di nuovo. Se diventa fastidioso: spostare il repo fuori dal
+Desktop, o escludere la cartella dalla sync di Drive.
+
+**Primo step consigliato quando si riprende**
+1. `python BiHome_wearable.py` da sorgente (NON l'exe) e vedere se parte.
+2. Flow completo: wizard → 1 partecipante → Polar (+EmotiBit se accesa) →
+   verificare che i thread partano e il viewer apra le finestre.
+3. REC → qualche secondo → STOP → controllare `%APPDATA%\BiHome\recordings\`
+   e **aprire davvero l'XDF** (non fidarsi dell'esistenza del file).
+4. Solo DOPO che il flow funziona: ribuildare l'exe.
 
 **Per Claude**: se Vittorio chiede di continuare il lavoro, chiedi
 prima cosa vuole fare. Non assumere che il lavoro pendente debba essere
-ripreso da dove l'ho lasciato — possono essere passati giorni.
+ripreso da dove l'ho lasciato — sono passati mesi.
+
+---
+
+## 13. Prompt di apertura (per una chat nuova)
+
+Vittorio: in una chat nuova, incolla il blocco qui sotto. Se sei su Claude
+Code con il repo già clonato, basta la prima riga: Claude leggerà il file
+da solo.
+
+```
+Lavoro a BiHome Wearable. Leggi CHAT_CONTEXT.md nella root del repo
+(C:\Users\vitto\Desktop\BiHome_wearable\) prima di fare qualsiasi cosa:
+contiene lo stato completo del progetto, le convenzioni e il playbook.
+
+Contesto in due righe: sistema di acquisizione multi-dispositivo (Polar
+H10 via BLE + EmotiBit via WiFi → LSL → XDF) per ricerca in psicologia,
+PyQt5 + bleak + BrainFlow + pylsl, ~4500 righe nel backend principale.
+
+Punti aperti che trovi dettagliati in §10 e §12 di quel file:
+1. l'exe in dist/ è vecchio e contiene due crash già fixati nel sorgente
+2. il test end-to-end oltre il wizard (REC → STOP → XDF leggibile) non è
+   mai stato completato
+3. EmotiBit non veniva scoperta nell'ultimo tentativo (BOARD_NOT_READY)
+
+Non partire a modificare codice: dimmi prima cosa proponi.
+```
+
+**Note per il modello che riceve il passaggio:**
+- Lingua: italiano con Vittorio, inglese nel codice e nei commenti.
+- `ast.parse` su `BiHome_wearable.py` richiede `encoding='utf-8'`
+  esplicito — il default cp1252 di Windows va in `UnicodeDecodeError`
+  sulle emoji nelle label dei bottoni.
+- Non fidarti dei soli audit statici: `8be4fd5` e `d83e7cf` erano entrambi
+  sintatticamente validi, passavano il build, e il wizard arrivava a fine.
+  Serve il run end-to-end, nella modalità di lancio giusta.
+- Su una macchina sola non vedi tutto: il bug `d83e7cf` esisteva solo con
+  venv, invisibile su Anaconda e nell'exe frozen.
+- Il viewer è un **subprocess separato**: se cambi il contratto degli
+  stream LSL, aggiorna anche `Viewer/lsl_viewer.py`.
