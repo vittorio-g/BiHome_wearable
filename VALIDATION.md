@@ -1,0 +1,231 @@
+# BiHome Wearable — validation pipeline
+
+Validate the BiHome wearables (Polar H10, EmotiBit) against a **BIOPAC** gold
+standard by recording both into one synchronized XDF and computing agreement
+metrics per signal.
+
+Everything for this lives in **`validation/`** and is kept separate from the
+acquisition app so its (heavier) analysis dependencies never enter the
+PyInstaller build.
+
+---
+
+## 1. How it fits together
+
+```
+  BIOPAC (AcqKnowledge) ──LSL──┐
+                               ├──> one XDF (shared LSL clock) ──> analyze_xdf.py ──> report.html
+  BiHome wearables ──LSL───────┘         (LabRecorder)                                + metrics.csv/json + figures
+```
+
+- The BIOPAC must publish an **LSL outlet** on the network. BiHome's viewer
+  already records it (see §3) — no acquisition-app change is needed.
+- All streams share the LSL clock, so the XDF gives a common, alignable
+  timeline. Analysis resamples each channel pair to a common grid, removes a
+  constant timing offset, and computes the agreement panel.
+
+> **BIOPAC → LSL dependency.** AcqKnowledge streams over its Network Data
+> Transfer (TCP), which is *not* LSL out of the box. You need a BIOPAC LSL
+> outlet (a vendor/community LSL app, or a small NDT→LSL bridge). Confirm one is
+> visible with `inspect_streams.py` (§2) before relying on live capture.
+
+---
+
+## 2. Install
+
+```powershell
+cd C:\Users\vitto\Downloads\BiHome_wearable
+.\.venv\Scripts\python.exe -m pip install -r validation\requirements-validation.txt
+```
+
+(pylsl, numpy, scipy, pandas, matplotlib, pyxdf, neurokit2.)
+
+---
+
+## 3. Recording a real validation session
+
+1. Start the **BIOPAC LSL outlet** and the BiHome app; let both stream.
+2. Capture the live stream inventory to learn the BIOPAC stream's real name,
+   channels and units:
+   ```powershell
+   .\.venv\Scripts\python.exe validation\inspect_streams.py --resolve 5 --sample 5
+   ```
+   Non-BiHome streams are flagged as *candidate reference (BIOPAC?)*.
+3. Edit **`validation/channel_map.json`** so each pair points at the real
+   wearable and BIOPAC stream/channel names and units (see §5).
+4. In the BiHome viewer, the BIOPAC stream appears under the **"_other"** group
+   with its own **REC** checkbox (the viewer resolves *all* LSL streams, not
+   only `P0N_…`). Leave it checked, press **REC**, run the protocol, **STOP**.
+   The XDF lands in `%APPDATA%\BiHome\recordings\`.
+5. Analyse it (§6).
+
+---
+
+## 3b. Two-PC setup with BIOPAC MP160 (TTL sync) — the real path
+
+BIOPAC's AcqKnowledge **LSL license does not export** its own acquired data
+(it only *ingests* other LSL devices). So the MP160 is recorded on its own PC
+in AcqKnowledge (`.acq`) and aligned to the BiHome XDF **offline via a shared
+TTL trigger**.
+
+**Hardware chain** (from the working technician setup):
+```
+BiHome PC --USB-TTL (COMx, 115200 8N1)--> STP100D --> MP160 digital D8-D15 --> AcqKnowledge .acq
+```
+The STP100D speaks the same serial protocol as the BBTK USB-TTL module:
+2-char UPPERCASE hex pairs, `"RR"` init, `"01".."FF"` set lines (LATCH), `"00"`
+reset. `validation/ttl_trigger.py` implements it headless.
+
+**Fire synchronized events** with `validation/sync_marker.py` on the BiHome PC,
+*during* the recording — each fire emits an **LSL marker** (into the XDF) AND a
+**TTL pulse** (into the .acq) at the same instant. Fire ≥2 (e.g. start and end)
+so the analysis fits both clock **offset and drift**:
+
+```powershell
+.\.venv\Scripts\python.exe validation\sync_marker.py --port COM3 --pulses 3 --interval 5
+# (omit --port / add --no-ttl for a marker-only dry run)
+```
+
+This creates an LSL marker stream named **`BiHomeSync`** (recorded by the BiHome
+viewer like any stream) and drives D8-D15 on the MP160.
+
+**Then align + analyse** in one command:
+```powershell
+.\.venv\Scripts\python.exe validation\analyze_xdf.py session.xdf `
+    --acq biopac.acq --acq-trigger "<D8-D15 channel name>" --xdf-trigger BiHomeSync
+```
+`analyze_xdf` detects the TTL pulses in the `.acq`, reads the `BiHomeSync` marker
+timestamps, fits `LSL ≈ slope·acq + offset` (`validation/sync.py`), remaps the
+BIOPAC channels onto the LSL timeline (`validation/acq_sync.py`), and runs the
+normal agreement analysis. It prints the fit (slope/offset) and the **max
+residual** across pulses — a sync-quality check (should be a few ms).
+
+Point `channel_map.json`'s `reference.stream` at `"BIOPAC"` and each
+`reference.channel` at the real `.acq` channel name (check it with the .acq, or
+with the digital channels D8-D15 enabled in AcqKnowledge).
+
+Useful `analyze_xdf.py` flags for real `.acq`: `--acq-polarity rising|falling`,
+`--acq-min-interval <s>`, `--acq-threshold <v>`, `--xdf-trigger-threshold <v>`,
+`--max-resid-ms <ms>`. The analysis prints loud `!! SYNC WARNING` lines if there
+are <3 pulses, the clock-fit residual is too large, or the slope is far from 1.0.
+
+### Pre-flight checklist (first real session)
+
+1. AcqKnowledge recording; digital channels **D8-D15 enabled**.
+2. Start `sync_marker.py` **before** pressing REC (BiHome records only streams it
+   already knows at REC, and freezes the REC checkboxes during recording).
+3. In BiHome confirm **`BiHomeSync` appears and is REC-checked**, then press REC.
+4. Fire **≥3 pulses** spread across start/middle/end (use `--pulses 0` to keep
+   firing every `--interval` s for the whole session).
+5. **Eyeball the first TTL pulse in AcqKnowledge** on the expected channel before
+   trusting the rest (the driver is write-only — it can't tell if the cable/STP100D
+   is actually delivering).
+6. Export a short test `.acq` (≥3 pulses) and run `read_acq()` to confirm bioread
+   parses it and to read the **real channel names**.
+7. Rewrite `channel_map.json` with the real names/units (from `inspect_streams.py`
+   + the `.acq`), including the correct `scale_reference_to_wearable`.
+8. Confirm `neurokit2` imports in the analysis machine's venv.
+
+## 4. Developing/Testing without hardware (mocks)
+
+```powershell
+# stream synthetic wearable + BIOPAC outlets (Ctrl-C to stop)
+.\.venv\Scripts\python.exe validation\mock_streams.py
+
+# or record a ready-made test XDF (no GUI), then analyse it
+.\.venv\Scripts\python.exe validation\make_test_recording.py --duration 60
+.\.venv\Scripts\python.exe validation\analyze_xdf.py validation\test_recordings\<file>.xdf
+```
+
+The mock derives wearable and BIOPAC channels from a shared "truth" with a
+**known** unit scale (1000× ECG), a **+0.1 °C** temperature bias, a **40 ms**
+reference lag and measurement noise — so the metrics have a ground truth.
+`tests/test_agreement.py` unit-tests the metric functions directly.
+
+---
+
+## 5. channel_map.json
+
+```jsonc
+{ "pairs": [
+  { "name": "ECG", "kind": "ecg",
+    "wearable":  { "stream": "P01_PolarECG", "channel": "ECG", "unit": "uV" },
+    "reference": { "stream": "BIOPAC",       "channel": "ECG", "unit": "mV" },
+    "scale_reference_to_wearable": 1000.0 }
+] }
+```
+
+- `channel` is a label (matched against the stream's XML channel labels) or an
+  integer index.
+- `scale_reference_to_wearable` multiplies the reference so its units match the
+  wearable before scale-sensitive metrics (CCC/ICC/Bland-Altman). Use `1.0`
+  when units already match.
+- `kind` (`ecg`, `eda`, else generic) selects the signal-specific analysis.
+- Only pairs whose **both** streams exist in the XDF are analysed; a
+  BIOPAC-only channel (e.g. RSP without a wearable counterpart) is simply not
+  paired.
+
+---
+
+## 6. Analyse
+
+```powershell
+.\.venv\Scripts\python.exe validation\analyze_xdf.py path\to\recording.xdf
+# options: --map <file>   --out <dir>   --no-lag-correct
+```
+
+Output (in `validation/reports/<recording>/`): `report.html`, `metrics.csv`,
+`metrics.json`, and per-pair figures (time series, scatter, Bland-Altman; plus
+HR-over-time for ECG and tonic/phasic for EDA).
+
+---
+
+## 7. Reading the metrics
+
+**Generic (every pair)**
+- **pearson_r / spearman_r** — linear / rank correlation. Scale- and
+  offset-invariant: high `r` with low CCC ⇒ a systematic scale/offset error.
+- **ccc** — Lin's Concordance: agreement *and* calibration; penalised by any
+  bias or scale mismatch.
+- **icc_2_1** — absolute-agreement intraclass correlation (two-way random).
+- **bias / loa_lower / loa_upper** — Bland-Altman mean difference and 95% limits
+  of agreement (wearable − reference). `prop_bias_slope` ≠ 0 ⇒ bias depends on
+  signal level.
+- **rmse / mae / mape_pct / nrmse_pct** — error magnitude (NRMSE normalised by
+  reference range).
+- **coverage** — fraction of usable (non-NaN) sample pairs.
+- **lag_s** — estimated wearable-vs-reference timing offset (removed before
+  amplitude metrics unless `--no-lag-correct`).
+
+**ECG (`kind: ecg`)**
+- **hr_\*** — agreement of the instantaneous heart-rate time series.
+- **hrv_{rmssd,sdnn,pnn50,mean_hr}_{wear,ref,absdiff}** — HRV per device + abs
+  difference.
+- **beat_{sensitivity,ppv,f1,abs_err_ms}** — R-peak detection agreement
+  (reference peaks = ground truth) and mean beat-timing error.
+
+**EDA (`kind: eda`)**
+- **scl_\*** — tonic (skin-conductance-level) agreement.
+- **scr_{sensitivity,ppv,f1,count_wear,count_ref}** — phasic SCR event agreement.
+
+---
+
+## 8. Caveats / open items
+
+- **Units & scale** matter for CCC/ICC/Bland-Altman (not for Pearson). Set
+  `scale_reference_to_wearable` from the real units in the inventory.
+- **Sampling rates** differ (Polar ECG 130 Hz vs BIOPAC ~1–2 kHz); analysis
+  resamples to the wearable rate. Raw high-frequency ECG morphology is therefore
+  not the target — derived HR/HRV and R-peak agreement are.
+- **Lag**: a constant offset is estimated and removed; the value is reported. A
+  *drifting* offset is not corrected (LSL clock sync should keep it small).
+- **Live agreement monitor**: `live_monitor.py` (standalone console) prints a
+  rolling-window readout per pair — latest values, rolling Pearson r (with an
+  in-window timing-offset correction so ECG is meaningful) and bias:
+  ```powershell
+  .\.venv\Scripts\python.exe validation\live_monitor.py --window 10
+  ```
+  It is a sanity monitor ("are the devices tracking now?"), not a replacement
+  for the offline report. It is intentionally separate from the BiHome viewer
+  (no acquisition-app change). An *embedded* monitor inside the viewer is a
+  possible future addition.

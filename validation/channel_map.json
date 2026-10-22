@@ -1,0 +1,33 @@
+{
+  "_comment": "Pairing of wearable channels to reference (BIOPAC) channels. Built for the mock streams; adapt stream names/channels/units to the REAL BIOPAC inventory (validation/stream_inventory.json) once captured. 'channel' may be an integer index or a channel label (matched against the stream's XML channel labels). 'scale_reference_to_wearable' multiplies the reference signal so its units match the wearable before computing scale-sensitive metrics (CCC/ICC/Bland-Altman); use 1.0 when units already match.",
+  "pairs": [
+    {
+      "name": "ECG",
+      "kind": "ecg",
+      "wearable":  { "stream": "P01_PolarECG", "channel": "ECG", "unit": "uV" },
+      "reference": { "stream": "BIOPAC",       "channel": "ECG", "unit": "mV" },
+      "scale_reference_to_wearable": 1000.0
+    },
+    {
+      "name": "EDA",
+      "kind": "eda",
+      "wearable":  { "stream": "P01_EmoEDA", "channel": "EDA", "unit": "uS" },
+      "reference": { "stream": "BIOPAC",     "channel": "EDA", "unit": "uS" },
+      "scale_reference_to_wearable": 1.0
+    },
+    {
+      "name": "PPG",
+      "kind": "ppg",
+      "wearable":  { "stream": "P01_EmoPPG", "channel": "PPG", "unit": "a.u." },
+      "reference": { "stream": "BIOPAC",     "channel": "PPG", "unit": "a.u." },
+      "scale_reference_to_wearable": 1.0
+    },
+    {
+      "name": "TEMP",
+      "kind": "temperature",
+      "wearable":  { "stream": "P01_EmoTemp", "channel": "TEMP", "unit": "degC" },
+      "reference": { "stream": "BIOPAC",      "channel": "TEMP", "unit": "degC" },
+      "scale_reference_to_wearable": 1.0
+    }
+  ]
+}
