@@ -200,6 +200,60 @@ State files in `%APPDATA%/BiHome/`:
 
 ---
 
+## 6b. Branch `validation` — lavoro NON in main ⚠️
+
+Esiste un branch remoto **`validation`** (14 commit, 2026-06-16/17, +2834
+righe) che è in realtà **il lavoro più recente del progetto**, successivo a
+tutto quello che sta in `main`. Chi riprende il progetto deve saperlo:
+`git log main` da solo non lo mostra.
+
+**Cosa fa**: valida le wearable (Polar H10, EmotiBit) contro un **BIOPAC
+MP160** usato come gold standard, registrando entrambi in un XDF
+sincronizzato e calcolando metriche di agreement per segnale.
+
+**È puramente additivo** — non tocca `BiHome_wearable.py` né il viewer. Solo
+`VALIDATION.md` + un package `validation/` + 3 righe di `.gitignore`. Quindi
+il merge in main è a basso rischio; è rimasto fuori per tenere le dipendenze
+pesanti (scipy, pandas, matplotlib, pyxdf, neurokit2) **fuori dal build
+PyInstaller** dell'app.
+
+**Architettura della validazione**: AcqKnowledge **non esporta** i propri dati
+via LSL (la licenza LSL solo *ingerisce*), quindi il BIOPAC si registra sul
+suo PC in `.acq` e si allinea all'XDF **offline tramite un TTL condiviso**:
+
+```
+BiHome PC --USB-TTL (COMx 115200 8N1)--> STP100D --> MP160 D8-D15 --> .acq
+```
+
+`sync_marker.py` spara simultaneamente un marker LSL (→ XDF) e un impulso TTL
+(→ .acq); `analyze_xdf.py` rileva gli impulsi, fitta `LSL ≈ slope·acq +
+offset` e riporta il residuo max come indicatore di qualità del sync.
+Servono **≥3 impulsi** per fittare offset *e* drift.
+
+**Moduli principali** (tutti in `validation/`):
+- `inspect_streams.py` — inventario degli stream LSL live
+- `mock_streams.py` / `make_test_recording.py` — sviluppo **senza hardware**,
+  con ground truth nota (scala ECG 1000×, bias temp +0.1 °C, lag 40 ms)
+- `agreement.py` / `signal_specific.py` — metriche (Pearson, CCC, ICC,
+  Bland-Altman, HRV, beat-matching, SCR)
+- `analyze_xdf.py` — pipeline offline → `report.html` + metrics + figure
+- `live_monitor.py` — monitor console rolling, deliberatamente separato dal viewer
+- `ttl_trigger.py` / `sync_marker.py` / `sync.py` / `acq_sync.py` — catena TTL
+- `tests/` — 4 file di unit test
+- `channel_map.json` — mappa coppie wearable↔reference, **da riscrivere con i
+  nomi reali dei canali** prima della prima sessione vera
+
+**Stato**: scritto e unit-testato, ma **mai girato contro hardware BIOPAC
+reale**. `VALIDATION.md` §3b ha una checklist pre-flight di 8 punti. Due
+dipendenze esterne non verificate: che `bioread` parsi il `.acq` reale, e che
+la catena USB-TTL→STP100D consegni davvero gli impulsi (il driver è
+write-only, non può accorgersi di un cavo staccato).
+
+**Se Vittorio chiede di lavorare alla validazione**: `git checkout validation`
+e leggere `VALIDATION.md` per intero prima di toccare qualsiasi cosa.
+
+---
+
 ## 7. Convenzioni / decisioni architetturali
 
 **Naming stream LSL**: `P01_PolarECG`, `P01_PolarACC`, `P01_EmoPPG`, …
@@ -309,6 +363,8 @@ Pre-distribuzione, da fare su almeno 2 macchine (dev + altra):
 Quando ricevi questo file in una nuova chat e Vittorio chiede di
 lavorare a BiHome, leggi nell'ordine:
 
+0. **`git log --oneline --all -20` e `git branch -a`** — prima di tutto:
+   verifica su quale branch sei e se `validation` ha lavoro più recente (§6b).
 1. **Questo file** (CHAT_CONTEXT.md) — overview e stato corrente
 2. **README.md** — setup dev
 3. **DISTRIBUTION.md** — guida utente finale (utile per capire il
@@ -347,7 +403,9 @@ lavorare a BiHome, leggi nell'ordine:
 - HEAD = `d83e7cf` (2026-06-09), working tree pulito, allineato con
   `origin/main`. `BiHome_wearable.py` = 4534 righe, `ast.parse` OK.
 - Repo GitHub: `https://github.com/vittorio-g/BiHome_wearable.git`.
-  Esiste anche un branch remoto `validation` (contenuto non verificato).
+- ⚠️ Il branch **`validation`** (2026-06-17) contiene il lavoro più recente del
+  progetto e **non è in `main`** — vedere §6b. Non dimenticartelo: guardando
+  solo `main` sembra che il progetto sia fermo al 9 giugno.
 - Zero path hardcoded `vitto` nei `.py` → clonabile su qualsiasi macchina.
 - Entrambi i fix critici di startup (`8be4fd5` + `d83e7cf`) sono in `main`.
 
@@ -429,11 +487,15 @@ Contesto in due righe: sistema di acquisizione multi-dispositivo (Polar
 H10 via BLE + EmotiBit via WiFi → LSL → XDF) per ricerca in psicologia,
 PyQt5 + bleak + BrainFlow + pylsl, ~4500 righe nel backend principale.
 
-Punti aperti che trovi dettagliati in §10 e §12 di quel file:
+Attenzione a una cosa: il lavoro più recente sta sul branch `validation`,
+NON su main (pipeline di validazione contro BIOPAC — §6b del file).
+
+Punti aperti che trovi dettagliati in §6b, §10 e §12 di quel file:
 1. l'exe in dist/ è vecchio e contiene due crash già fixati nel sorgente
 2. il test end-to-end oltre il wizard (REC → STOP → XDF leggibile) non è
    mai stato completato
 3. EmotiBit non veniva scoperta nell'ultimo tentativo (BOARD_NOT_READY)
+4. la pipeline di validazione non è mai girata contro il BIOPAC reale
 
 Non partire a modificare codice: dimmi prima cosa proponi.
 ```
