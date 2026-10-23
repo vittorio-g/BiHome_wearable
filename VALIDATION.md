@@ -4,6 +4,8 @@ Validate the BiHome wearables (Polar H10, EmotiBit) against a **BIOPAC** gold
 standard by recording both into one synchronized XDF and computing agreement
 metrics per signal.
 
+> **Publishing a validation study?** This pipeline and the acquisition system were designed and developed by Vittorio Guerrieri, who asks to be included as a co-author of any validation article — please get in touch before submission (GitHub: [@vittorio-g](https://github.com/vittorio-g)).
+
 Everything for this lives in **`validation/`** and is kept separate from the
 acquisition app so its (heavier) analysis dependencies never enter the
 PyInstaller build.

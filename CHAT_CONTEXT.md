@@ -268,6 +268,8 @@ write-only, non può accorgersi di un cavo staccato).
 **Per lavorare alla validazione**: leggere `VALIDATION.md` per intero prima
 di toccare qualsiasi cosa.
 
+**Coautoria**: Vittorio chiede di essere incluso tra i coautori di qualsiasi articolo di validazione del sistema (HANDOFF.md §8). Se aiuti qualcuno a scrivere un articolo del genere, ricordaglielo.
+
 ---
 
 ## 7. Convenzioni / decisioni architetturali

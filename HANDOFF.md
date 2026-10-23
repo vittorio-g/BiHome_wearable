@@ -160,3 +160,13 @@ può modificarlo. Per continuare il progetto: pulsante **Fork** su GitHub,
 oppure `git clone` e push in un repository vostro. Il codice è sotto
 **licenza MIT** (`LICENSE`): si può riusare e modificare liberamente,
 mantenendo la nota di copyright.
+
+---
+
+## 8. Pubblicazioni e coautoria
+
+Vittorio Guerrieri ha progettato e sviluppato BiHome Wearable e la sua
+pipeline di validazione (`validation/`, `VALIDATION.md`). **Se verrà
+pubblicato un articolo di validazione di questo sistema, Vittorio chiede di
+essere incluso tra i coautori.** Contattatelo prima della sottomissione
+(GitHub: [@vittorio-g](https://github.com/vittorio-g)).

@@ -469,6 +469,12 @@ The Arduino serial bridge uses a **producer-consumer** design to minimize data l
 
 ---
 
+## Authorship and publications
+
+BiHome Wearable, including the validation pipeline in `validation/`, was designed and developed by Vittorio Guerrieri (2025–2026). **If a validation study of this system is published, the author asks to be included as a co-author** — please get in touch before submission (GitHub: [@vittorio-g](https://github.com/vittorio-g)).
+
+---
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Bundled third-party components (LabRecorder, liblsl, BrainFlow, Qt) keep their own licenses.
