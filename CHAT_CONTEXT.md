@@ -436,7 +436,11 @@ lavorare a BiHome, leggi nell'ordine:
   di startup (`8be4fd5` + `d83e7cf`) sono in `main`.
 - Zero path hardcoded `vitto` nei `.py` → clonabile su qualsiasi macchina.
 
-**Le due macchine (storico, entrambe dismesse o da verificare)**
+**Le due macchine (storico)** — al 2026-10-23 Vittorio conferma che la dev
+machine era l'unica con lavoro BiHome non ancora salvato; tutto è su GitHub e
+nel Drive. Le registrazioni archiviate sono solo prove con i dati di
+Vittorio stesso, nessun partecipante. Il repo resta pubblico, senza
+collaboratori: si continua con fork o clone.
 
 | | Dev machine | Seconda macchina |
 |---|---|---|

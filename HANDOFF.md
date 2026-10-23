@@ -23,7 +23,7 @@ il setup, un viewer mostra i segnali dal vivo, un pulsante REC registra.
 |---|---|
 | **Codice** (tutto, con la storia completa) | GitHub `vittorio-g/BiHome_wearable`, branch `main` — repository **pubblico** |
 | Firmware Polar via Arduino non committato (mar 2026) | branch `archive/polar2-firmware-wip-2026-03` |
-| **Dati, registrazioni di prova, prototipi originali, video, credenziali** | Google Drive di Vittorio → cartella **`BiHome Wearable - Handoff 2026-10`** (leggere il suo `00_LEGGIMI.md`) |
+| **Dati, registrazioni di prova, prototipi originali, video, credenziali** | Google Drive di Vittorio → cartella **`BiHome Wearable - Handoff 2026-10`** (leggere il suo `00_LEGGIMI.md`). È privata: accessibile solo se Vittorio la condivide. |
 | Backup offline del repository | stessa cartella Drive → `01_Codice/BiHome_wearable.bundle` |
 | Exe pronto da usare | stessa cartella Drive → `01_Codice/` (zip) |
 
@@ -148,11 +148,13 @@ I dati di runtime (registrazioni, log, registro dispositivi) vanno in
 È stato verificato il 2026-10-22: nessuna password o token nei file né nella
 storia Git, `secrets.h` mai committato, credenziali oscurate in `legacy/`.
 Restano due registrazioni di prova tracciate (`data/exp001/block_Prova_1.xdf`,
-`data/Comparison_ecg/Comparison_ecg.xdf`). **Se un giorno il repository
+`data/Comparison_ecg/Comparison_ecg.xdf`), che contengono solo dati di
+Vittorio registrati su se stesso. **Se un giorno il repository
 dovesse contenere registrazioni di partecipanti reali, va reso privato
 prima** (GDPR): i dati di ricerca stanno nel Drive o nello storage del
 laboratorio, mai qui.
 
-Il repository è sull'account GitHub personale di Vittorio. Per continuare a
-lavorarci: chiedergli di aggiungervi come collaboratori, di trasferirlo
-all'organizzazione GitHub del laboratorio, oppure fatene un fork.
+Il repository resta sull'account GitHub personale di Vittorio, **pubblico e
+senza collaboratori**: chiunque può clonarlo o farne un fork, nessun altro
+può modificarlo. Per continuare il progetto: pulsante **Fork** su GitHub,
+oppure `git clone` e push in un repository vostro.
