@@ -466,3 +466,9 @@ The Arduino serial bridge uses a **producer-consumer** design to minimize data l
 | Streams not visible in LabRecorder | Script not running or firewall | Verify the script is running and all devices are on the same network segment |
 | UWB: `checkSPI KO` | SPI wiring or reset issue | Check CS/MOSI/MISO/SCK wiring and RSTn on pin D9 |
 | Polar disconnects after pairing | Windows reduced MTU to 23 | Unpair the Polar H10 from Windows Bluetooth settings |
+
+---
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Bundled third-party components (LabRecorder, liblsl, BrainFlow, Qt) keep their own licenses.

@@ -157,4 +157,6 @@ laboratorio, mai qui.
 Il repository resta sull'account GitHub personale di Vittorio, **pubblico e
 senza collaboratori**: chiunque può clonarlo o farne un fork, nessun altro
 può modificarlo. Per continuare il progetto: pulsante **Fork** su GitHub,
-oppure `git clone` e push in un repository vostro.
+oppure `git clone` e push in un repository vostro. Il codice è sotto
+**licenza MIT** (`LICENSE`): si può riusare e modificare liberamente,
+mantenendo la nota di copyright.
